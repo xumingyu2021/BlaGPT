@@ -1,0 +1,9 @@
+huggingface_hub
+numpy
+torch
+tiktoken
+datasets
+coqpit
+
+causal_conv1d
+mamba_ssm
