@@ -16,7 +16,7 @@ def run_training(config, run_name):
     command = [
         "torchrun",
         "--nproc_per_node=8",
-        "train_blagpt.py",
+        "train.py",
         f"--config={config_file}",
         f"--run_name={run_name}",
     ]
@@ -26,6 +26,15 @@ def run_training(config, run_name):
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
     output, error = process.communicate()
+
+    # Check if the process exited with an error
+    if process.returncode != 0:
+        print(f"Error occurred during training for run: {run_name}")
+        print("Error output:")
+        print(error)
+        print("Standard output:")
+        print(output)
+        return None, None, None
 
     # Parse the output to extract relevant metrics
     val_loss = None
@@ -60,11 +69,21 @@ def hyperparameter_search():
         ],
         "activation": [
             "geglu",
+            "swiglu",
         ],
-        "tie_embed_weights": [True, False],
-        "zero_init_proj_layers": [True, False],
+        "tie_embed_weights": [
+            True,
+        ],
+        "zero_init_proj_layers": [
+            True,
+        ],
         # "use_soft_logit_capping": [True, False], # when true OOM
-        "use_rotary_emb": [True, False],
+        "use_rotary_emb": [
+            True,
+        ],
+        "rmsnorm_before_qk": [
+            True,
+        ],
     }
 
     # Generate all combinations of hyperparameters
@@ -86,7 +105,8 @@ def hyperparameter_search():
 
         results.append(
             {
-                "config": config_dict,
+                "params": config_dict,
+                "config": config.to_dict(),
                 "val_loss": val_loss,
                 "memory_usage": memory_usage,
                 "step_time": step_time,

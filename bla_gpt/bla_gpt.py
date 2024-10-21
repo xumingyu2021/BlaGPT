@@ -13,12 +13,12 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/gp
 - Cap logits in attention
 - Share embedding weights and output weights
 - QKV Bias
-- Soft attention logit capping
+- Soft attention logit capping - ❗OOM
 - Rotary Position Embedding
 - zero-init projection layers
-
-
+- Differential Attention - ❗OOM
 - RMSNorm before attention for Query and Key
+- Pre and post RMS norm
 
 
 - Do you use regular pos embedding when rotary is on?
@@ -40,30 +40,32 @@ from attentions import (
     soft_cap,
 )
 from coqpit import Coqpit
-from mlps import MLP, GeGLU_MLP
+from mlps import MLP, GeGLU_MLP, SwiGLU_MLP
 from norms import LayerNorm, RMSNorm
 from torch.nn import functional as F
 
 
 @dataclass
 class GPTConfig(Coqpit):
+    """Default values for the best performed model so far"""
+
     block_size: int = 1024
     vocab_size: int = 50304  # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.0
-    bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    bias: bool = False  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
     norm_layer: str = "rmsnorm"
-    attention: str = "DiffAttn"
-    activation: str = "geglu"
+    attention: str = "GQA"
+    activation: str = "swiglu"
     use_soft_logit_capping: bool = False
     n_kv_head: int = 4
     tie_embed_weights: bool = True
-    zero_init_proj_layers: bool = False
-    rmsnorm_before_qk: bool = False
-    use_rotary_emb: bool = False
+    zero_init_proj_layers: bool = True
+    rmsnorm_before_qk: bool = True
+    use_rotary_emb: bool = True
 
 
 def get_attention(config, depth=None):
@@ -89,6 +91,8 @@ def get_mlp(config):
         return MLP(config)
     elif config.activation == "geglu":
         return GeGLU_MLP(config)
+    elif config.activation == "swiglu":
+        return SwiGLU_MLP(config)
     raise ValueError(f"Unrecognized activation type {config.activation}")
 
 

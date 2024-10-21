@@ -3,8 +3,10 @@ import os
 import sys
 
 from coqpit import Coqpit
+from ngpt import nGPT, nGPTConfig
 
 from bla_gpt import GPT, GPTConfig
+from rene import ReneConfig, ReneLMHeadModel
 
 with open(sys.argv[0]) as f:
     code = f.read()  # read the code of this file ASAP, for logging
@@ -16,6 +18,42 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+
+
+class TeeLogger:
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, "a")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+
+def get_model(model_name):
+    if model_name == "bla_gpt":
+        return GPT
+    elif model_name == "ngpt":
+        return nGPT
+    elif model_name == "rene":
+        return ReneLMHeadModel
+    raise ValueError(f"Unrecognized model name {model_name}")
+
+
+def get_config(model_name):
+    if model_name == "bla_gpt":
+        return GPTConfig
+    elif model_name == "ngpt":
+        return nGPTConfig
+    elif model_name == "rene":
+        return ReneConfig
+    raise ValueError(f"Unrecognized model name {model_name}")
+
 
 # -----------------------------------------------------------------------------
 # Our own simple Distributed Data Loader
@@ -111,6 +149,7 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--run_name", type=str, default=None)
+    parser.add_argument("--model_name", type=str, default="bla_gpt")
     cli_args = parser.parse_args()
 
     @dataclass
@@ -141,7 +180,7 @@ if __name__ == "__main__":
         )
 
     args = Hyperparameters()
-    model_config = GPTConfig()
+    model_config = get_config(cli_args.model_name)()
 
     if cli_args.run_name:
         args.run_name = cli_args.run_name
@@ -187,8 +226,8 @@ if __name__ == "__main__":
 
     # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency. suggested to me by @Grad62304977.
     # this originates from Karpathy's experiments.
-    num_vocab = 50304
-    model = GPT(model_config)
+    model = get_model(cli_args.model_name)
+    model = model(model_config)
     model = model.cuda()
 
     if args.compile_model:
@@ -197,11 +236,16 @@ if __name__ == "__main__":
     model_size = (
         sum(p.numel() for p in model.parameters()) * 4 / (1024**2)
     )  # size in MB
+
     num_parameters = sum(p.numel() for p in model.parameters())
+    num_trainable_parameters = sum(
+        p.numel() for p in model.parameters() if p.requires_grad
+    )
 
     if master_process:
         print(f"Model size: {model_size:.2f} MB")
         print(f"Number of parameters: {num_parameters}")
+        print(f"Number of trainable parameters: {num_trainable_parameters}")
 
     # here we wrap model into DDP container
     model = DDP(model, device_ids=[ddp_local_rank])
@@ -250,27 +294,27 @@ if __name__ == "__main__":
         os.makedirs(logdir, exist_ok=True)
         logfile = "logs/%s.txt" % run_id
         print(f"Logging run in {logdir}")
-        # create the log file
-        with open(logfile, "w") as f:
-            # begin the log by printing this file (the Python code)
-            f.write("=" * 100 + "\n")
-            f.write(code)
-            f.write("=" * 100 + "\n")
-            # log information about the hardware/software environment this is running on
-            # and print the full `nvidia-smi` to file
-            f.write(
-                f"Running pytorch {torch.version.__version__} compiled for CUDA {torch.version.cuda}\nnvidia-smi:\n"
-            )
-            import subprocess
+        # create the log file and set up TeeLogger
+        sys.stdout = TeeLogger(logfile)
+        # begin the log by printing this file (the Python code)
+        print("=" * 100)
+        print(code)
+        print("=" * 100)
+        # log information about the hardware/software environment this is running on
+        # and print the full `nvidia-smi` to file
+        print(
+            f"Running pytorch {torch.version.__version__} compiled for CUDA {torch.version.cuda}\nnvidia-smi:"
+        )
+        import subprocess
 
-            result = subprocess.run(
-                ["nvidia-smi"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            f.write(f"{result.stdout}\n")
-            f.write("=" * 100 + "\n")
+        result = subprocess.run(
+            ["nvidia-smi"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        print(f"{result.stdout}")
+        print("=" * 100)
 
     training_time_ms = 0
     # start the clock
@@ -330,6 +374,8 @@ if __name__ == "__main__":
             log = dict(
                 step=step,
                 code=code,
+                model_config=model_config.to_dict(),
+                train_config=args.to_dict(),
                 model=raw_model.state_dict(),
                 optimizers=[opt.state_dict() for opt in optimizers],
             )
@@ -361,7 +407,8 @@ if __name__ == "__main__":
             else:
                 loss.backward()  # just sync on the last step
         for p in model.parameters():
-            p.grad /= train_accumulation_steps
+            if p.grad is not None:
+                p.grad /= train_accumulation_steps
         # step the optimizers and schedulers
         for opt, sched in zip(optimizers, schedulers):
             opt.step()
@@ -378,10 +425,6 @@ if __name__ == "__main__":
             print(
                 f"step:{step+1}/{args.num_iterations} lr:{lr} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms"
             )
-            with open(logfile, "a") as f:
-                f.write(
-                    f"step:{step+1}/{args.num_iterations} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms\n"
-                )
 
     if master_process:
         print(
