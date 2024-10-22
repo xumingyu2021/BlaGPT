@@ -1,12 +1,7 @@
-import math
 import os
 import sys
 
 from coqpit import Coqpit
-from ngpt import nGPT, nGPTConfig
-
-from bla_gpt import GPT, GPTConfig
-from rene import ReneConfig, ReneLMHeadModel
 
 with open(sys.argv[0]) as f:
     code = f.read()  # read the code of this file ASAP, for logging
@@ -32,27 +27,45 @@ class TeeLogger:
 
     def flush(self):
         self.terminal.flush()
-        self.log.flush()
 
 
 def get_model(model_name):
     if model_name == "bla_gpt":
+        from bla_gpt import GPT
         return GPT
     elif model_name == "ngpt":
+        from ngpt import nGPT
         return nGPT
     elif model_name == "rene":
+        from rene import ReneLMHeadModel
         return ReneLMHeadModel
+    elif model_name == "zamba2":
+        from zamba2.mamba_model import MambaModel
+        return MambaModel
+    elif model_name == "rwkv_v7":
+        from rwkv7.model import RWKV7Model
+        return RWKV7Model
     raise ValueError(f"Unrecognized model name {model_name}")
 
 
 def get_config(model_name):
     if model_name == "bla_gpt":
+        from bla_gpt import GPTConfig
         return GPTConfig
     elif model_name == "ngpt":
+        from ngpt import nGPTConfig
         return nGPTConfig
     elif model_name == "rene":
+        from rene import ReneConfig
         return ReneConfig
+    elif model_name == "zamba2":
+        from zamba2.config import MambaConfig
+        return MambaConfig
+    elif model_name == "rwkv_v7":
+        from rwkv7.model import RWKV7Config
+        return RWKV7Config
     raise ValueError(f"Unrecognized model name {model_name}")
+
 
 
 # -----------------------------------------------------------------------------
@@ -155,7 +168,7 @@ if __name__ == "__main__":
     @dataclass
     class Hyperparameters(Coqpit):
         run_name: str = "nano_gpt+rms_norm+geglu+gqa+softcap"
-        compile_model: bool = False
+        compile_model: bool = True
         # data hyperparams
         input_bin: str = (
             "../data/fineweb10B/fineweb_train_*.bin"  # input .bin to train on
@@ -260,6 +273,7 @@ if __name__ == "__main__":
         betas=(0.9, 0.95),
         weight_decay=args.weight_decay,
         fused=True,
+        foreach=False,
     )
 
     optimizers = [
