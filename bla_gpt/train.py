@@ -1,3 +1,4 @@
+import datetime
 import os
 import sys
 
@@ -13,6 +14,9 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+
+os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
+os.environ["NCCL_TIMEOUT"] = "1800"
 
 
 class TeeLogger:
@@ -32,40 +36,57 @@ class TeeLogger:
 def get_model(model_name):
     if model_name == "bla_gpt":
         from bla_gpt import GPT
+
         return GPT
     elif model_name == "ngpt":
         from ngpt import nGPT
+
         return nGPT
     elif model_name == "rene":
         from rene import ReneLMHeadModel
+
         return ReneLMHeadModel
     elif model_name == "zamba2":
         from zamba2.mamba_model import MambaModel
+
         return MambaModel
     elif model_name == "rwkv_v7":
         from rwkv7.model import RWKV7Model
+
         return RWKV7Model
+    elif model_name == "megabyte":
+        from megabyte import MegaByte
+
+        return MegaByte
     raise ValueError(f"Unrecognized model name {model_name}")
 
 
 def get_config(model_name):
     if model_name == "bla_gpt":
         from bla_gpt import GPTConfig
+
         return GPTConfig
     elif model_name == "ngpt":
         from ngpt import nGPTConfig
+
         return nGPTConfig
     elif model_name == "rene":
         from rene import ReneConfig
+
         return ReneConfig
     elif model_name == "zamba2":
         from zamba2.config import MambaConfig
+
         return MambaConfig
     elif model_name == "rwkv_v7":
         from rwkv7.model import RWKV7Config
-        return RWKV7Config
-    raise ValueError(f"Unrecognized model name {model_name}")
 
+        return RWKV7Config
+    elif model_name == "megabyte":
+        from megabyte import MegaByteConfig
+
+        return MegaByteConfig
+    raise ValueError(f"Unrecognized model name {model_name}")
 
 
 # -----------------------------------------------------------------------------
@@ -178,7 +199,7 @@ if __name__ == "__main__":
         batch_size: int = 8 * 64  # batch size, in sequences, across all devices
         device_batch_size: int = 32  # batch size, in sequences, per device
         sequence_length: int = 1024  # sequence length, in tokens
-        num_iterations: int = 5100  # number of iterations to run
+        num_iterations: int = 5100  # 5100  # number of iterations to run
         learning_rate: float = 0.0018
         warmup_iters: int = 250
         warmdown_iters: int = 2000  # number of iterations of linear warmup/warmdown for triangular or trapezoidal schedule
@@ -203,7 +224,9 @@ if __name__ == "__main__":
 
     # set up DDP (distributed data parallel). torchrun sets this env variable
     assert torch.cuda.is_available()
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(
+        backend="nccl", init_method="env://", timeout=datetime.timedelta(minutes=30)
+    )
     ddp_rank = int(os.environ["RANK"])
     ddp_local_rank = int(os.environ["LOCAL_RANK"])
     ddp_world_size = int(os.environ["WORLD_SIZE"])
@@ -239,6 +262,7 @@ if __name__ == "__main__":
 
     # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency. suggested to me by @Grad62304977.
     # this originates from Karpathy's experiments.
+    torch.cuda.empty_cache()
     model = get_model(cli_args.model_name)
     model = model(model_config)
     model = model.cuda()
@@ -261,7 +285,7 @@ if __name__ == "__main__":
         print(f"Number of trainable parameters: {num_trainable_parameters}")
 
     # here we wrap model into DDP container
-    model = DDP(model, device_ids=[ddp_local_rank])
+    model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=True)
     raw_model = model.module  # always contains the "raw" unwrapped model
     ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
 
@@ -435,7 +459,7 @@ if __name__ == "__main__":
         # dist.all_reduce(train_loss, op=dist.ReduceOp.AVG) # all-reducing the training loss would be more correct in terms of logging, but slower
         if master_process:
             approx_time = training_time_ms + 1000 * (time.time() - t0)
-            lr = get_lr(step)
+            lr = optimizers[0].param_groups[0]["lr"]
             print(
                 f"step:{step+1}/{args.num_iterations} lr:{lr} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms"
             )

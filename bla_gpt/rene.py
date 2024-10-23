@@ -73,7 +73,7 @@ class ReneConfig(PretrainedConfig):
 
     def __init__(
         self,
-        d_model: int = 768,
+        d_model: int = 1024,
         n_layer: int = 12,
         vocab_size: int = 50304,
         ssm_cfg: Optional[Dict] = {"norm_before_gate": True},
@@ -83,7 +83,7 @@ class ReneConfig(PretrainedConfig):
         attn_cfg: Optional[Dict] = {
             "causal": True,
             "head_dim": 768 // 12,
-            "num_heads": 12,
+            "num_heads": 16,
             "out_proj_bias": True,
             "qkv_proj_bias": True,
             "sliding_window_length": 2048,
