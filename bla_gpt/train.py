@@ -3,6 +3,7 @@ import os
 import sys
 
 from coqpit import Coqpit
+from utils import get_model
 
 with open(sys.argv[0]) as f:
     code = f.read()  # read the code of this file ASAP, for logging
@@ -32,61 +33,11 @@ class TeeLogger:
     def flush(self):
         self.terminal.flush()
 
+    def isatty(self):
+        return hasattr(self.terminal, "isatty") and self.terminal.isatty()
 
-def get_model(model_name):
-    if model_name == "bla_gpt":
-        from bla_gpt import GPT
-
-        return GPT
-    elif model_name == "ngpt":
-        from ngpt import nGPT
-
-        return nGPT
-    elif model_name == "rene":
-        from rene import ReneLMHeadModel
-
-        return ReneLMHeadModel
-    elif model_name == "zamba2":
-        from zamba2.mamba_model import MambaModel
-
-        return MambaModel
-    elif model_name == "rwkv_v7":
-        from rwkv7.model import RWKV7Model
-
-        return RWKV7Model
-    elif model_name == "megabyte":
-        from megabyte import MegaByte
-
-        return MegaByte
-    raise ValueError(f"Unrecognized model name {model_name}")
-
-
-def get_config(model_name):
-    if model_name == "bla_gpt":
-        from bla_gpt import GPTConfig
-
-        return GPTConfig
-    elif model_name == "ngpt":
-        from ngpt import nGPTConfig
-
-        return nGPTConfig
-    elif model_name == "rene":
-        from rene import ReneConfig
-
-        return ReneConfig
-    elif model_name == "zamba2":
-        from zamba2.config import MambaConfig
-
-        return MambaConfig
-    elif model_name == "rwkv_v7":
-        from rwkv7.model import RWKV7Config
-
-        return RWKV7Config
-    elif model_name == "megabyte":
-        from megabyte import MegaByteConfig
-
-        return MegaByteConfig
-    raise ValueError(f"Unrecognized model name {model_name}")
+    def fileno(self):
+        return self.terminal.fileno()
 
 
 # -----------------------------------------------------------------------------
@@ -189,7 +140,7 @@ if __name__ == "__main__":
     @dataclass
     class Hyperparameters(Coqpit):
         run_name: str = "nano_gpt+rms_norm+geglu+gqa+softcap"
-        compile_model: bool = True
+        compile_model: bool = False
         # data hyperparams
         input_bin: str = (
             "../data/fineweb10B/fineweb_train_*.bin"  # input .bin to train on
@@ -199,7 +150,7 @@ if __name__ == "__main__":
         batch_size: int = 8 * 64  # batch size, in sequences, across all devices
         device_batch_size: int = 32  # batch size, in sequences, per device
         sequence_length: int = 1024  # sequence length, in tokens
-        num_iterations: int = 5100  # 5100  # number of iterations to run
+        num_iterations: int = 1_000_000  # 5100  # number of iterations to run
         learning_rate: float = 0.0018
         warmup_iters: int = 250
         warmdown_iters: int = 2000  # number of iterations of linear warmup/warmdown for triangular or trapezoidal schedule
@@ -210,11 +161,15 @@ if __name__ == "__main__":
         )
         val_tokens: int = 10485760  # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
         save_every: int = (
-            1000  # every how many steps to save the checkpoint? 0 for only at the end
+            5000  # every how many steps to save the checkpoint? 0 for only at the end
         )
+        # checkpoint params
+        keep_last_n_checkpoints: int = 5  # number of checkpoints to keep
+        save_best_model: bool = True  # whether to save best model based on val loss
 
     args = Hyperparameters()
-    model_config = get_config(cli_args.model_name)()
+    model_config, model = get_model(cli_args.model_name)
+    model_config = model_config()
 
     if cli_args.run_name:
         args.run_name = cli_args.run_name
@@ -263,7 +218,6 @@ if __name__ == "__main__":
     # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency. suggested to me by @Grad62304977.
     # this originates from Karpathy's experiments.
     torch.cuda.empty_cache()
-    model = get_model(cli_args.model_name)
     model = model(model_config)
     model = model.cuda()
 
@@ -355,6 +309,7 @@ if __name__ == "__main__":
         print("=" * 100)
 
     training_time_ms = 0
+    best_val_loss = float("inf")
     # start the clock
     torch.cuda.synchronize()
     t0 = time.time()
@@ -402,6 +357,26 @@ if __name__ == "__main__":
             torch.cuda.synchronize()
             t0 = time.time()
 
+            # Save best model if validation loss improved
+            if master_process and (args.save_best_model and val_loss < best_val_loss):
+                best_val_loss = val_loss
+                log = dict(
+                    step=step,
+                    code=code,
+                    model_config=model_config.to_dict(),
+                    train_config=args.to_dict(),
+                    model=raw_model.state_dict(),
+                    optimizers=[opt.state_dict() for opt in optimizers],
+                    val_loss=val_loss,
+                )
+                best_model_path = f"logs/{run_id}/best_model_{step}.pt"
+                torch.save(log, best_model_path)
+
+                # Remove previous best model if exists
+                for f in glob.glob(f"logs/{run_id}/best_model_*.pt"):
+                    if f != best_model_path:
+                        os.remove(f)
+
         if master_process and (
             last_step or (args.save_every > 0 and step % args.save_every == 0)
         ):
@@ -418,6 +393,14 @@ if __name__ == "__main__":
                 optimizers=[opt.state_dict() for opt in optimizers],
             )
             torch.save(log, "logs/%s/state_step%06d.pt" % (run_id, step))
+
+            # Cleanup old checkpoints
+            if args.keep_last_n_checkpoints > 0:
+                checkpoints = sorted(glob.glob(f"logs/{run_id}/state_step*.pt"))
+                if len(checkpoints) > args.keep_last_n_checkpoints:
+                    for checkpoint in checkpoints[: -args.keep_last_n_checkpoints]:
+                        os.remove(checkpoint)
+
             # start the clock again
             torch.cuda.synchronize()
             t0 = time.time()

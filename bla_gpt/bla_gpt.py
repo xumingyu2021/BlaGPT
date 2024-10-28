@@ -40,9 +40,10 @@ from attentions import (
     soft_cap,
 )
 from coqpit import Coqpit
-from mlps import MLP, GeGLU_MLP, SwiGLU_MLP
+from mlps import MLP, GeGLU_MLP, Maxout_MLP, Negout_MLP, SwiGLU_MLP
 from norms import LayerNorm, RMSNorm
 from torch.nn import functional as F
+from utils import register_model
 
 
 @dataclass
@@ -66,6 +67,8 @@ class GPTConfig(Coqpit):
     zero_init_proj_layers: bool = True
     rmsnorm_before_qk: bool = True
     use_rotary_emb: bool = True
+    use_res_weights: bool = True
+    use_qkv_bias: bool = True
 
 
 def get_attention(config, depth=None):
@@ -93,6 +96,10 @@ def get_mlp(config):
         return GeGLU_MLP(config)
     elif config.activation == "swiglu":
         return SwiGLU_MLP(config)
+    elif config.activation == "negout":
+        return Negout_MLP(config)
+    elif config.activation == "maxout":
+        return Maxout_MLP(config)
     raise ValueError(f"Unrecognized activation type {config.activation}")
 
 
@@ -103,10 +110,18 @@ class Block(nn.Module):
         self.attn = get_attention(config, depth)
         self.ln_2 = get_norm(config)
         self.mlp = get_mlp(config)
+        # Initialize closer to zero for better training stability
+        self.res_w1 = nn.Parameter(torch.ones(1)) if config.use_res_weights else None
+        self.res_w2 = nn.Parameter(torch.ones(1)) if config.use_res_weights else None
 
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        if self.res_w1 is not None:
+            # Apply weights to the branch paths instead of main path
+            x = self.res_w1 * x + self.attn(self.ln_1(x))
+            x = self.res_w2 * x + self.mlp(self.ln_2(x))
+        else:
+            x = x + self.attn(self.ln_1(x))
+            x = x + self.mlp(self.ln_2(x))
         return x
 
 
@@ -376,3 +391,8 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+
+
+@register_model
+def register_blagpt():
+    return GPTConfig, GPT

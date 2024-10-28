@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from beartype import beartype
 from coqpit import Coqpit
-from einops import pack, rearrange, reduce, repeat, unpack
+from einops import pack, rearrange, repeat, unpack
 from einops.layers.torch import Rearrange
 from packaging import version
 from torch import einsum, nn
@@ -18,6 +18,7 @@ from torch.amp import autocast
 from torch.nn import Module, ModuleList
 from torch.nn.attention import SDPBackend
 from tqdm import tqdm
+from utils import register_model
 
 # helpers
 
@@ -535,7 +536,7 @@ class MegaByte(Module):
 
         ids = ids[:, :-1]
         ids[:, :-1] = ids[:, 1:]
-        ids = torch.cat((ids, targets[:, -1:]), dim=-1)
+        ids = torch.cat((ids, targets[:, -1:]), dim=-1)  # [b, t_main]
 
         batch = ids.shape[0]
 
@@ -552,7 +553,9 @@ class MegaByte(Module):
             multiple_of = reduce_mult(self.max_seq_len[1:])
             padding = remainder_to_mult(seq_len, multiple_of)
             ids = F.pad(ids, (0, padding), value=self.pad_id)
-            ids = ids.reshape(batch, -1, *self.max_seq_len[1:])
+            ids = ids.reshape(
+                batch, -1, *self.max_seq_len[1:]
+            )  #  [b, t1, t2] t1*t2 = t_main
 
         b, *prec_dims, device = *ids.shape, ids.device
 
@@ -657,6 +660,11 @@ class MegaByte(Module):
         loss = F.cross_entropy(preds[..., :-1], labels, ignore_index=self.pad_id)
 
         return logits, loss
+
+
+@register_model
+def register_megabyte():
+    return MegaByteConfig, MegaByte
 
 
 if __name__ == "__main__":

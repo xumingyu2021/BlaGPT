@@ -17,6 +17,7 @@ from torch.nn import Module, ModuleList
 # constants
 from torch.nn.attention import SDPBackend
 from torch.nn.utils.parametrize import register_parametrization
+from utils import register_model
 
 SDP_BACKEND_MAP = dict(
     enable_flash=SDPBackend.FLASH_ATTENTION,
@@ -492,3 +493,8 @@ class nGPT(Module):
         )
 
         return logits, loss
+
+
+@register_model
+def register_ngpt():
+    return nGPTConfig, nGPT

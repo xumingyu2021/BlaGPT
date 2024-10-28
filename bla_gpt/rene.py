@@ -20,6 +20,7 @@ except ImportError:
 from typing import Dict, List, Optional
 
 from transformers.configuration_utils import PretrainedConfig
+from utils import register_model
 
 
 class ReneConfig(PretrainedConfig):
@@ -618,3 +619,8 @@ class ReneLMHeadModel(PreTrainedModel, MambaGenerationMixin):
         Refer to that method for argument names and defaults.
         """
         return MambaGenerationMixin.generate(self, *args, **kwargs)
+
+
+@register_model
+def register_rene():
+    return ReneConfig, ReneLMHeadModel

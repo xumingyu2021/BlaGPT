@@ -127,11 +127,13 @@ class CausalGroupedQueryAttention(nn.Module):
         self.soft_cap = 50.0 if config.use_soft_logit_capping else 0.0
 
         # Projections for query, key, and value
-        self.q_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.q_proj = nn.Linear(
+            config.n_embd, config.n_embd, bias=config.bias or config.use_qkv_bias
+        )
         self.kv_proj = nn.Linear(
             config.n_embd,
             2 * config.n_embd // (config.n_head // config.n_kv_head),
-            bias=config.bias,
+            bias=config.bias or config.use_qkv_bias,
         )
 
         # Output projection
