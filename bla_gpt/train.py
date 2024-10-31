@@ -140,7 +140,7 @@ if __name__ == "__main__":
     @dataclass
     class Hyperparameters(Coqpit):
         run_name: str = "nano_gpt+rms_norm+geglu+gqa+softcap"
-        compile_model: bool = False
+        compile_model: bool = True
         # data hyperparams
         input_bin: str = (
             "../data/fineweb10B/fineweb_train_*.bin"  # input .bin to train on
@@ -340,15 +340,25 @@ if __name__ == "__main__":
                 x_val, y_val = val_loader.next_batch()
                 with ctx:  # of course, we'd like to use no_grad() here too, but that creates a torch.compile error for some reason
                     _, loss = model(x_val, y_val)
+
+                    metrics = None
+                    if type(loss) is dict:
+                        metrics = {k: v for k, v in loss.items() if k != "total"}
+                        loss = loss["total"]
                     val_loss += loss.detach()
                     del loss
             dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
             val_loss /= val_steps
             # log val loss to console and to logfile
             if master_process:
-                print(
-                    f"step:{step}/{args.num_iterations} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/(timed_steps-1):.2f}ms"
-                )
+                if metrics is None:
+                    print(
+                        f"step:{step}/{args.num_iterations} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/(timed_steps-1):.2f}ms"
+                    )
+                else:
+                    print(
+                        f"step:{step}/{args.num_iterations} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/(timed_steps-1):.2f}ms {metrics}"
+                    )
                 with open(logfile, "a") as f:
                     f.write(
                         f"step:{step}/{args.num_iterations} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/(timed_steps-1):.2f}ms\n"
@@ -418,7 +428,12 @@ if __name__ == "__main__":
             # forward pass
             with ctx:
                 _, loss = model(x, y)
+                metrics = None
+                if type(loss) is dict:
+                    metrics = {k: v for k, v in loss.items() if k != "total"}
+                    loss = loss["total"]
                 train_loss = loss.detach()
+
             # advance the dataset for the next batch
             x, y = train_loader.next_batch()
             # backward pass
@@ -443,9 +458,14 @@ if __name__ == "__main__":
         if master_process:
             approx_time = training_time_ms + 1000 * (time.time() - t0)
             lr = optimizers[0].param_groups[0]["lr"]
-            print(
-                f"step:{step+1}/{args.num_iterations} lr:{lr} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms"
-            )
+            if metrics is None:
+                print(
+                    f"step:{step+1}/{args.num_iterations} lr:{lr} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms"
+                )
+            else:
+                print(
+                    f"step:{step+1}/{args.num_iterations} lr:{lr} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms {metrics}"
+                )
 
     if master_process:
         print(

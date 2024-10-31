@@ -4,13 +4,21 @@ import logging
 import os
 import sys
 import warnings
-from inspect import signature
+
+import torch
 
 warnings.filterwarnings(
     "ignore", category=SyntaxWarning, message="invalid escape sequence"
 )
 
 logger = logging.getLogger("base")
+
+
+def detach_loss(x):
+    """Detach and convert it to a float value if necessary."""
+    if isinstance(x, torch.Tensor) and x.numel() == 1:
+        return x.detach().item()
+    return x
 
 
 class RegisteredModelNameError(Exception):
