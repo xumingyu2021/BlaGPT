@@ -150,8 +150,8 @@ if __name__ == "__main__":
         batch_size: int = 8 * 64  # batch size, in sequences, across all devices
         device_batch_size: int = 32  # batch size, in sequences, per device
         sequence_length: int = 1024  # sequence length, in tokens
-        num_iterations: int = 1_000_000  # 5100  # number of iterations to run
-        learning_rate: float = 0.0018
+        num_iterations: int = 5100  # number of iterations to run
+        learning_rate: float = 4e-4  # 0.0018
         warmup_iters: int = 250
         warmdown_iters: int = 2000  # number of iterations of linear warmup/warmdown for triangular or trapezoidal schedule
         weight_decay: float = 0
@@ -336,17 +336,18 @@ if __name__ == "__main__":
             model.eval()
             val_loader.reset()
             val_loss = 0.0
-            for _ in range(val_steps):
-                x_val, y_val = val_loader.next_batch()
-                with ctx:  # of course, we'd like to use no_grad() here too, but that creates a torch.compile error for some reason
-                    _, loss = model(x_val, y_val)
+            with torch.no_grad():
+                for _ in range(val_steps):
+                    x_val, y_val = val_loader.next_batch()
+                    with ctx:  # of course, we'd like to use no_grad() here too, but that creates a torch.compile error for some reason
+                        _, loss = model(x_val, y_val)
 
-                    metrics = None
-                    if type(loss) is dict:
-                        metrics = {k: v for k, v in loss.items() if k != "total"}
-                        loss = loss["total"]
-                    val_loss += loss.detach()
-                    del loss
+                        metrics = None
+                        if type(loss) is dict:
+                            metrics = {k: v for k, v in loss.items() if k != "total"}
+                            loss = loss["total"]
+                        val_loss += loss.detach()
+                        del loss
             dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
             val_loss /= val_steps
             # log val loss to console and to logfile
@@ -365,6 +366,7 @@ if __name__ == "__main__":
                     )
             # start the clock again
             torch.cuda.synchronize()
+            torch.cuda.empty_cache()
             t0 = time.time()
 
             # Save best model if validation loss improved

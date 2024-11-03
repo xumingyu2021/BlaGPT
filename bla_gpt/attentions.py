@@ -14,207 +14,7 @@ except ModuleNotFoundError:
 
 
 def soft_cap(x, cap):
-    return cap * torch.tanh(x / cap)
-
-
-def soft_cap_mod(score, b, h, q_idx, kv_idx):
-    score = score / 50
-    score = torch.tanh(score)
-    score = score * 50
-    return score
-
-
-class CausalSelfAttention(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        assert config.n_embd % config.n_head == 0
-        # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        # regularization
-        self.attn_dropout = nn.Dropout(config.dropout)
-        self.resid_dropout = nn.Dropout(config.dropout)
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
-        self.dropout = config.dropout
-
-        # RMSNorm before q and k projections
-        if config.rmsnorm_before_qk:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
-
-        # Rotary embeddings
-        if config.use_rotary_emb:
-            self.rotary = Rotary(self.head_dim)
-
-        # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
-        self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention")
-        if not self.flash:
-            print(
-                "WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0"
-            )
-            # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer(
-                "bias",
-                torch.tril(torch.ones(config.block_size, config.block_size)).view(
-                    1, 1, config.block_size, config.block_size
-                ),
-            )
-
-    def forward(self, x):
-        B, T, C = (
-            x.size()
-        )  # batch size, sequence length, embedding dimensionality (n_embd)
-
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-
-        if hasattr(self, "q_norm"):
-            q = self.q_norm(q)
-            k = self.k_norm(k)
-
-        if hasattr(self, "rotary"):
-            cos, sin = self.rotary(q)
-            q = apply_rotary_emb(q, cos, sin)
-            k = apply_rotary_emb(k, cos, sin)
-
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T, hs)
-
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        if self.flash:
-            # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=None,
-                dropout_p=self.dropout if self.training else 0,
-                is_causal=True,
-            )
-        else:
-            # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
-            att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
-            y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = (
-            y.transpose(1, 2).contiguous().view(B, T, C)
-        )  # re-assemble all head outputs side by side
-
-        # output projection
-        y = self.resid_dropout(self.c_proj(y))
-        return y
-
-
-class CausalGroupedQueryAttention(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        assert config.n_embd % config.n_head == 0
-        self.n_head = config.n_head
-        self.n_kv_head = config.n_kv_head  # New parameter for number of key-value heads
-        self.n_embd = config.n_embd
-        self.head_dim = config.n_embd // config.n_head
-        self.soft_cap = 50.0 if config.use_soft_logit_capping else 0.0
-
-        # Projections for query, key, and value
-        self.q_proj = nn.Linear(
-            config.n_embd, config.n_embd, bias=config.bias or config.use_qkv_bias
-        )
-        self.kv_proj = nn.Linear(
-            config.n_embd,
-            2 * config.n_embd // (config.n_head // config.n_kv_head),
-            bias=config.bias or config.use_qkv_bias,
-        )
-
-        # Output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-
-        # RMSNorm before q and k projections
-        if config.rmsnorm_before_qk:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
-
-        # Rotary embeddings
-        if config.use_rotary_emb:
-            self.rotary = Rotary(self.head_dim)
-
-        # Regularization
-        self.attn_dropout = nn.Dropout(config.dropout)
-        self.resid_dropout = nn.Dropout(config.dropout)
-        self.dropout = config.dropout
-
-        # Flash attention support
-        self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention")
-
-        # Causal mask
-        self.register_buffer(
-            "bias",
-            torch.tril(torch.ones(config.block_size, config.block_size)).view(
-                1, 1, config.block_size, config.block_size
-            ),
-        )
-
-    def forward(self, x):
-        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality
-
-        # Project queries, keys, and values
-        q = self.q_proj(x).view(B, T, self.n_head, self.head_dim)  # (B, nh, T, hs)
-        kv = self.kv_proj(x).view(B, T, 2, self.n_kv_head, self.head_dim)
-        k, v = kv.unbind(dim=2)  # (B, T, n_kv_head, hs)
-
-        if hasattr(self, "q_norm"):
-            q = self.q_norm(q)
-            k = self.k_norm(k)
-
-        if hasattr(self, "rotary"):
-            cos, sin = self.rotary(q)
-            q = apply_rotary_emb(q, cos, sin)
-            k = apply_rotary_emb(k, cos, sin)
-
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)  # (B, n_kv_head, T, hs)
-        v = v.transpose(1, 2)  # (B, n_kv_head, T, hs)
-
-        # Repeat keys and values to match the number of query heads
-        k = k.repeat_interleave(self.n_head // self.n_kv_head, dim=1)  # (B, nh, T, hs)
-        v = v.repeat_interleave(self.n_head // self.n_kv_head, dim=1)  # (B, nh, T, hs)
-
-        # Perform attention
-        if self.flash and self.soft_cap == 0:
-            # Efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=None,
-                dropout_p=self.dropout if self.training else 0,
-                is_causal=True,
-            )
-        else:
-            # Manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            if self.soft_cap > 0:
-                att = soft_cap(att, self.soft_cap)
-            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
-            att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
-            y = att @ v  # (B, nh, T, hs)
-
-        # Reshape and apply output projection
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
-        y = self.resid_dropout(self.c_proj(y))
-
-        return y
+    return x.div_(cap).tanh_().mul_(cap)
 
 
 def apply_rotary_emb(x, cos, sin):
@@ -246,13 +46,169 @@ class Rotary(torch.nn.Module):
         return self.cos_cached[None, :, None, :], self.sin_cached[None, :, None, :]
 
 
-"""
-Differential Attention - WIP
-"""
+class Attention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0
+        self.n_head = config.n_head
+        self.n_kv_head = config.n_kv_head  # New parameter for number of key-value heads
+        self.n_embd = config.n_embd
+        self.head_dim = config.n_embd // config.n_head
+        self.soft_cap = 50.0 if config.use_soft_logit_capping else 0.0
+
+        # Projections for query, key, and value
+        self.q_proj = nn.Linear(
+            config.n_embd, config.n_embd, bias=config.bias or config.use_qkv_bias
+        )
+        self.kv_proj = nn.Linear(
+            config.n_embd,
+            2 * config.n_embd // (config.n_head // config.n_kv_head),
+            bias=config.bias or config.use_qkv_bias,
+        )
+
+        # Output projection
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+
+        # RMSNorm before q and k projections
+        if config.rmsnorm_before_qk:
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
+
+        # Rotary embeddings
+        if config.pos_encoding == "rotary":
+            self.rotary = Rotary(self.head_dim)
+        elif config.pos_encoding == "relative":
+            self.rel_pos_emb = nn.Parameter(
+                torch.zeros(2 * config.block_size - 1, self.head_dim)
+            )
+            nn.init.normal_(self.rel_pos_emb, std=0.02)
+        elif config.pos_encoding == "none" or config.pos_encoding is None:
+            pass
+        else:
+            raise ValueError(f"Unknown positional encoding: {config.pos_encoding}")
+
+        # Regularization
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+        self.dropout = config.dropout
+
+        # Flash attention support
+        self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention")
+
+        # Causal mask
+        self.register_buffer(
+            "mask",
+            torch.tril(torch.ones(config.block_size, config.block_size)).view(
+                1, 1, config.block_size, config.block_size
+            ),
+        )
+
+    def forward(self, x, q=None):
+        B, T, C = x.size()
+        T_q = q.size(1) if q is not None else T
+
+        # Project inputs
+        q = self._project_query(q if q is not None else x, B, T_q)
+        k, v = self._project_kv(x, B, T)
+
+        # Apply normalization and rotary embeddings if configured
+        if hasattr(self, "q_norm"):
+            q, k = self._apply_norm(q, k)
+
+        if hasattr(self, "rotary"):
+            q, k = self._apply_rotary(q, k, T_q, T)
+        elif hasattr(self, "rel_pos_emb"):
+            q, k = self._apply_relative_pos(q, k, T_q, T)
+
+        # Prepare attention inputs
+        q, k, v = self._prepare_qkv(q, k, v)
+
+        # Compute attention
+        if self.flash and self.soft_cap == 0:
+            y = self._flash_attention(q, k, v)
+        else:
+            y = self._manual_attention(q, k, v, T)
+
+        # Project output
+        return self._project_output(y, B, T_q, C)
+
+    def _project_query(self, x, B, T):
+        return self.q_proj(x).view(B, T, self.n_head, self.head_dim)
+
+    def _project_kv(self, x, B, T):
+        kv = self.kv_proj(x).view(B, T, 2, self.n_kv_head, self.head_dim)
+        return kv.unbind(dim=2)
+
+    def _apply_norm(self, q, k):
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+        return q, k
+
+    def _apply_rotary(self, q, k, T_q, T):
+        cos, sin = self.rotary(q)
+        q = apply_rotary_emb(q, cos, sin)
+        cos, sin = self.rotary(k) if T_q != T else (cos, sin)
+        k = apply_rotary_emb(k, cos, sin)
+        return q, k
+
+    def _apply_relative_pos(self, q, k, T_q, T):
+        # Get relative position embeddings
+        pos_emb = self._get_rel_pos_emb(T_q, T)
+
+        # Apply relative position embeddings
+        q = q + pos_emb[:T_q].unsqueeze(0).unsqueeze(0)
+        k = k + pos_emb[:T].unsqueeze(0).unsqueeze(0)
+
+        return q, k
+
+    def _get_rel_pos_emb(self, T_q, T):
+        # Get relative position embeddings centered around each position
+        seq_length = max(T_q, T)
+        positions = torch.arange(seq_length, device=self.rel_pos_emb.device)
+        relative_positions = positions.unsqueeze(1) - positions.unsqueeze(0)
+        relative_positions = (
+            relative_positions + seq_length - 1
+        )  # shift to all positive
+        return self.rel_pos_emb[relative_positions]
+
+    def _prepare_qkv(self, q, k, v):
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        # Repeat k,v for multi-query attention
+        k = k.repeat_interleave(self.n_head // self.n_kv_head, dim=1)
+        v = v.repeat_interleave(self.n_head // self.n_kv_head, dim=1)
+
+        return q, k, v
+
+    def _flash_attention(self, q, k, v):
+        return torch.nn.functional.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=None,
+            dropout_p=self.dropout if self.training else 0,
+            is_causal=True,
+        )
+
+    def _manual_attention(self, q, k, v, T):
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        if self.soft_cap > 0:
+            att = soft_cap(att, self.soft_cap)
+        att = att.masked_fill(self.mask[:, :, :T, :T] == 0, float("-inf"))
+        att = F.softmax(att, dim=-1)
+        att = self.attn_dropout(att)
+        return att @ v
+
+    def _project_output(self, y, B, T_q, C):
+        y = y.transpose(1, 2).contiguous().view(B, T_q, C)
+        return self.resid_dropout(self.c_proj(y))
 
 
-def init_method(tensor, **kwargs):
-    nn.init.kaiming_uniform_(tensor, a=math.sqrt(5))
+"""
+Differential Attention - WIP (Getting OOM)
+"""
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:

@@ -13,7 +13,7 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/gp
 - Cap logits in attention
 - Share embedding weights and output weights
 - QKV Bias
-- Soft attention logit capping - ❗OOM
+- Soft attention logit capping
 - Rotary Position Embedding
 - zero-init projection layers
 - Differential Attention - ❗OOM
@@ -58,23 +58,28 @@ class GPTConfig(Coqpit):
     dropout: float = 0.0
     bias: bool = False  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
+    # New multi-token prediction parameters
+    n_predict: int = 1  # Number of future tokens to predict (1 = standard GPT)
+    share_prediction_heads: bool = (
+        False  # Whether to share parameters between prediction heads
+    )
+
     norm_layer: str = "rmsnorm"
-    attention: str = "GQA"
+    attention: str = "regular"
     activation: str = "swiglu"
     use_soft_logit_capping: bool = False
-    n_kv_head: int = 4
+    n_kv_head: int = 4  # Number of heads for the key and value (Grouped Query Attention), if n_kv_head == n_head, it is full attention
     tie_embed_weights: bool = True
     zero_init_proj_layers: bool = True
     rmsnorm_before_qk: bool = True
-    use_rotary_emb: bool = True
+    pos_encoding: bool = "rotary"
     use_res_weights: bool = True
     use_qkv_bias: bool = True
+    use_pre_post_norm: bool = False
 
 
 def get_attention(config, depth=None):
-    if config.attention == "GQA":
-        return CausalGroupedQueryAttention(config)
-    elif config.attention == "self":
+    if config.attention == "regular":
         return CausalSelfAttention(config)
     elif config.attention == "DiffAttn":
         return MultiheadDiffAttn(config, depth)
@@ -103,6 +108,20 @@ def get_mlp(config):
     raise ValueError(f"Unrecognized activation type {config.activation}")
 
 
+class MultiTokenPredictionHead(nn.Module):
+    """Head for predicting multiple future tokens"""
+
+    def __init__(self, config, head_index):
+        super().__init__()
+        self.head_index = head_index
+        self.norm = get_norm(config)
+        self.head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+    def forward(self, x):
+        x = self.norm(x)
+        return self.head(x)
+
+
 class Block(nn.Module):
     def __init__(self, config, depth):
         super().__init__()
@@ -110,18 +129,35 @@ class Block(nn.Module):
         self.attn = get_attention(config, depth)
         self.ln_2 = get_norm(config)
         self.mlp = get_mlp(config)
+
+        # Optional norm layers as per Gemma2
+        self.ln_3 = get_norm(config) if config.use_pre_post_norm else None
+        self.ln_4 = get_norm(config) if config.use_pre_post_norm else None
+
         # Initialize closer to zero for better training stability
         self.res_w1 = nn.Parameter(torch.ones(1)) if config.use_res_weights else None
         self.res_w2 = nn.Parameter(torch.ones(1)) if config.use_res_weights else None
 
+    def _process_branch(self, x, ln_pre, branch_fn, ln_post=None, res_weight=None):
+        # Process input through branch (attention or MLP)
+        branch_out = branch_fn(ln_pre(x))
+
+        # Apply optional post-normalization
+        if ln_post is not None:
+            branch_out = ln_post(branch_out)
+
+        # Apply optional residual weight
+        if res_weight is not None:
+            return res_weight * x + branch_out
+        return x + branch_out
+
     def forward(self, x):
-        if self.res_w1 is not None:
-            # Apply weights to the branch paths instead of main path
-            x = self.res_w1 * x + self.attn(self.ln_1(x))
-            x = self.res_w2 * x + self.mlp(self.ln_2(x))
-        else:
-            x = x + self.attn(self.ln_1(x))
-            x = x + self.mlp(self.ln_2(x))
+        # Attention branch
+        x = self._process_branch(x, self.ln_1, self.attn, self.ln_3, self.res_w1)
+
+        # MLP branch
+        x = self._process_branch(x, self.ln_2, self.mlp, self.ln_4, self.res_w2)
+
         return x
 
 
@@ -145,12 +181,20 @@ class GPT(nn.Module):
                 ln_f=get_norm(config),
             )
         )
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        if config.n_predict == 1:
+            self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        else:
+            # Independent parameters for each head
+            self.prediction_heads = nn.ModuleList(
+                [MultiTokenPredictionHead(config, i) for i in range(config.n_predict)]
+            )
+
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
         # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        if config.tie_embed_weights:
+        if config.tie_embed_weights and config.n_predict == 1:
             self.transformer.wte.weight = (
                 self.lm_head.weight
             )  # https://paperswithcode.com/method/weight-tying
@@ -213,13 +257,46 @@ class GPT(nn.Module):
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
-            logits = logits.float()
-            if self.soft_cap > 0.0:
-                logits = soft_cap(logits, self.soft_cap)
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
-            )
+            if hasattr(self, "lm_head"):
+                logits = self.lm_head(x)
+                logits = logits.float()
+                if self.soft_cap > 0.0:
+                    logits = soft_cap(logits, self.soft_cap)
+                loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
+                )
+            else:
+                total_loss = 0
+                loss_dict = {}
+                logits = []
+                for i, head in enumerate(self.prediction_heads):
+                    head_logits = head(x)  # (b, t, vocab_size)
+                    logits.append(head_logits)
+
+                    if targets is not None:
+                        # Shift targets for each prediction head
+                        shifted_targets = (
+                            targets[:, i:] if i < targets.size(1) else None
+                        )
+                        if shifted_targets is not None:
+                            head_logits = head_logits[
+                                :, : shifted_targets.size(1), :
+                            ].float()
+                            if self.soft_cap > 0.0:
+                                head_logits = soft_cap(head_logits, self.soft_cap)
+                            loss = F.cross_entropy(
+                                head_logits.reshape(-1, head_logits.size(-1)),
+                                shifted_targets.reshape(-1),
+                                ignore_index=-1,
+                            )
+                            total_loss += loss
+                            loss_dict[f"head{i+1}"] = loss.detach().item()
+
+                # Average the losses across heads
+                loss = total_loss / len(self.prediction_heads)
+                loss = {"total": loss}
+                loss.update(loss_dict)
+
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(
