@@ -34,8 +34,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from attentions import (
-    CausalGroupedQueryAttention,
-    CausalSelfAttention,
+    Attention,
     MultiheadDiffAttn,
     soft_cap,
 )
@@ -80,7 +79,7 @@ class GPTConfig(Coqpit):
 
 def get_attention(config, depth=None):
     if config.attention == "regular":
-        return CausalSelfAttention(config)
+        return Attention(config)
     elif config.attention == "DiffAttn":
         return MultiheadDiffAttn(config, depth)
     raise ValueError(f"Unrecognized attention type {config.attention}")
@@ -174,7 +173,7 @@ class GPT(nn.Module):
             dict(
                 wte=nn.Embedding(config.vocab_size, config.n_embd),
                 wpe=nn.Embedding(config.block_size, config.n_embd)
-                if not config.use_rotary_emb
+                if not config.pos_encoding not in [None, "none"]
                 else None,
                 drop=nn.Dropout(config.dropout),
                 h=nn.ModuleList([Block(config, d) for d in range(config.n_layer)]),
