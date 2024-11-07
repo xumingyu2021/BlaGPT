@@ -103,9 +103,13 @@ class Attention(nn.Module):
             ),
         )
 
-    def forward(self, x, q=None):
+    def forward(self, x, q=None, mask=None):
         B, T, C = x.size()
         T_q = q.size(1) if q is not None else T
+
+        # Update mask if provided
+        if mask is not None:
+            self.mask = mask
 
         # Project inputs
         q = self._project_query(q if q is not None else x, B, T_q)
