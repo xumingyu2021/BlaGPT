@@ -1,3 +1,4 @@
+import argparse
 import os
 import re
 import sys
@@ -87,32 +88,67 @@ def plot_val_loss_vs_time(data, y_min=None, y_max=None):
     plt.close()
 
 
-# Main execution
-logs_folder = "logs"  # Replace with the actual path to your logs folder
-data = {}
+def main():
+    parser = argparse.ArgumentParser(
+        description="Plot training metrics from log files."
+    )
+    parser.add_argument(
+        "--logs",
+        nargs="*",
+        help="Specific log files to process. If none provided, processes all .txt files in logs folder.",
+    )
 
-for filename in os.listdir(logs_folder):
-    if filename.endswith(".txt"):
-        file_path = os.path.join(logs_folder, filename)
-        steps, val_losses, train_times = parse_log_file(file_path)
+    args = parser.parse_args()
+    logs_folder = "logs"
+    data = {}
 
-        # Calculate tokens based on steps
-        tokens_per_step = 8 * 64 * 1024  # batch_size * sequence_length
-        tokens = [step * tokens_per_step for step in steps]
+    if args.logs:
+        # Process specific log files
+        for filename in args.logs:
+            if not os.path.exists(filename):
+                print(f"Warning: File {filename} does not exist. Skipping.")
+                continue
+            steps, val_losses, train_times = parse_log_file(filename)
 
-        data[filename] = (tokens, val_losses)
+            # Calculate tokens based on steps
+            tokens_per_step = 8 * 64 * 1024  # batch_size * sequence_length
+            tokens = [step * tokens_per_step for step in steps]
 
-# Plot loss vs tokens
-plot_val_loss_vs_tokens(data)
+            base_filename = os.path.basename(filename)
+            data[base_filename] = (tokens, val_losses)
+    else:
+        # Process all .txt files in logs folder
+        for filename in os.listdir(logs_folder):
+            if filename.endswith(".txt"):
+                file_path = os.path.join(logs_folder, filename)
+                steps, val_losses, train_times = parse_log_file(file_path)
 
-# Update data dictionary for time plot
-time_data = {
-    filename: (train_times, val_losses) for filename, (_, val_losses) in data.items()
-}
+                # Calculate tokens based on steps
+                tokens_per_step = 8 * 64 * 1024  # batch_size * sequence_length
+                tokens = [step * tokens_per_step for step in steps]
 
-# Plot loss vs wall clock time
-plot_val_loss_vs_time(time_data)
+                data[filename] = (tokens, val_losses)
 
-print(
-    "Plots have been saved as 'val_loss_vs_tokens_plot.png' and 'val_loss_vs_time_plot.png'"
-)
+    if not data:
+        print("No valid log files found to process.")
+        sys.exit(1)
+
+    # Plot loss vs tokens
+    plot_val_loss_vs_tokens(data)
+
+    # Update data dictionary for time plot
+    time_data = {
+        filename: (train_times, val_losses)
+        for filename, (_, val_losses) in data.items()
+    }
+
+    # Plot loss vs wall clock time
+    plot_val_loss_vs_time(time_data)
+
+    print(
+        "Plots have been saved as 'val_loss_vs_tokens_plot.png' and 'val_loss_vs_time_plot.png'"
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn.functional as F
 from kernel.rotary import apply_rotary_emb as apply_rotary_emb_kernel
+from modules.pattention import Pattention
 from torch import nn
 from torch.nn import functional as F
 
@@ -208,6 +209,20 @@ class Attention(nn.Module):
     def _project_output(self, y, B, T_q, C):
         y = y.transpose(1, 2).contiguous().view(B, T_q, C)
         return self.resid_dropout(self.c_proj(y))
+
+
+class PattentionSelfAttention(Attention):
+    def __init__(self, config):
+        super().__init__(config)
+        self.q_proj = Pattention(config)
+        self.k_proj = Pattention(config)
+        self.v_proj = Pattention(config)
+        self.kv_proj = None
+
+    def _project_kv(self, x, B, T):
+        k = self.k_proj(x).view(B, T, self.n_head, self.head_dim)
+        v = self.v_proj(x).view(B, T, self.n_head, self.head_dim)
+        return k, v
 
 
 """

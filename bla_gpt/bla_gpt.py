@@ -36,10 +36,12 @@ import torch.nn as nn
 from attentions import (
     Attention,
     MultiheadDiffAttn,
+    PattentionSelfAttention,
     soft_cap,
 )
 from coqpit import Coqpit
 from mlps import MLP, GeGLU_MLP, Maxout_MLP, Negout_MLP, SwiGLU_MLP
+from modules.pattention import Pattention
 from norms import LayerNorm, RMSNorm
 from torch.nn import functional as F
 from utils import register_model
@@ -65,7 +67,7 @@ class GPTConfig(Coqpit):
 
     norm_layer: str = "rmsnorm"
     attention: str = "regular"
-    activation: str = "swiglu"
+    activation: str = "sweiglu"
     use_soft_logit_capping: bool = False
     n_kv_head: int = 4  # Number of heads for the key and value (Grouped Query Attention), if n_kv_head == n_head, it is full attention
     tie_embed_weights: bool = True
@@ -77,11 +79,48 @@ class GPTConfig(Coqpit):
     use_pre_post_norm: bool = False
 
 
+@dataclass
+class TokenformerConfig(Coqpit):
+    """Default values for the best performed model so far"""
+
+    block_size: int = 1024
+    vocab_size: int = 50304  # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = False  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+
+    # New multi-token prediction parameters
+    n_predict: int = 1  # Number of future tokens to predict (1 = standard GPT)
+    share_prediction_heads: bool = (
+        False  # Whether to share parameters between prediction heads
+    )
+
+    norm_layer: str = "rmsnorm"
+    attention: str = "pattention"
+    activation: str = "pattention"
+    use_soft_logit_capping: bool = False
+    n_kv_head: int = 12  # Number of heads for the key and value (Grouped Query Attention), if n_kv_head == n_head, it is full attention
+    tie_embed_weights: bool = True
+    zero_init_proj_layers: bool = True
+    rmsnorm_before_qk: bool = True
+    pos_encoding: bool = "rotary"
+    use_res_weights: bool = True
+    use_qkv_bias: bool = True
+    use_pre_post_norm: bool = False
+
+    # pattention parameters
+    param_token_num: int = 768
+
+
 def get_attention(config, depth=None):
     if config.attention == "regular":
         return Attention(config)
     elif config.attention == "DiffAttn":
         return MultiheadDiffAttn(config, depth)
+    elif config.attention == "pattention":
+        return PattentionSelfAttention(config)
     raise ValueError(f"Unrecognized attention type {config.attention}")
 
 
@@ -104,6 +143,8 @@ def get_mlp(config):
         return Negout_MLP(config)
     elif config.activation == "maxout":
         return Maxout_MLP(config)
+    elif config.activation == "pattention":
+        return Pattention(config)
     raise ValueError(f"Unrecognized activation type {config.activation}")
 
 
@@ -472,3 +513,8 @@ class GPT(nn.Module):
 @register_model
 def register_blagpt():
     return GPTConfig, GPT
+
+
+@register_model
+def register_tokenformer():
+    return TokenformerConfig, GPT

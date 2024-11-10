@@ -3,13 +3,14 @@ import os
 import sys
 
 from coqpit import Coqpit
+from optimizers import get_optimizer
 from utils import get_model
 
 with open(sys.argv[0]) as f:
     code = f.read()  # read the code of this file ASAP, for logging
 import glob
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import torch
@@ -146,15 +147,26 @@ if __name__ == "__main__":
             "../data/fineweb10B/fineweb_train_*.bin"  # input .bin to train on
         )
         input_val_bin: str = "../data/fineweb10B/fineweb_val_*.bin"  # input .bin to eval validation loss on
-        # optimization hyperparams
+
+        # training
         batch_size: int = 8 * 64  # batch size, in sequences, across all devices
         device_batch_size: int = 32  # batch size, in sequences, per device
         sequence_length: int = 1024  # sequence length, in tokens
         num_iterations: int = 5100  # number of iterations to run
-        learning_rate: float = 4e-4  # 0.0018
+
+        # optimizer
+        optimizer_name: str = "Adam"
+        optimizer_args: dict = field(
+            default_factory=lambda: {
+                "betas": (0.9, 0.95),
+                "eps": 1e-8,
+                "weight_decay": 0.0,
+            }
+        )
+        learning_rate: float = 0.0018
         warmup_iters: int = 250
         warmdown_iters: int = 2000  # number of iterations of linear warmup/warmdown for triangular or trapezoidal schedule
-        weight_decay: float = 0
+
         # evaluation and logging hyperparams
         val_loss_every: int = (
             125  # every how many steps to evaluate val loss? 0 for only at the end
@@ -163,6 +175,7 @@ if __name__ == "__main__":
         save_every: int = (
             5000  # every how many steps to save the checkpoint? 0 for only at the end
         )
+
         # checkpoint params
         keep_last_n_checkpoints: int = 5  # number of checkpoints to keep
         save_best_model: bool = True  # whether to save best model based on val loss
@@ -245,13 +258,9 @@ if __name__ == "__main__":
 
     # init the optimizer(s)
     # foreach == false to save VRAM
-    optimizer1 = torch.optim.AdamW(
-        raw_model.parameters(),
-        lr=args.learning_rate,
-        betas=(0.9, 0.95),
-        weight_decay=args.weight_decay,
-        fused=True,
-        foreach=False,
+
+    optimizer1 = get_optimizer(
+        args.optimizer_name, args.optimizer_args, args.learning_rate, raw_model
     )
 
     optimizers = [
