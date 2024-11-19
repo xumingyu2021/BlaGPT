@@ -57,19 +57,6 @@ class Attention(nn.Module):
         self.head_dim = config.n_embd // config.n_head
         self.soft_cap = 50.0 if config.use_soft_logit_capping else 0.0
 
-        # Projections for query, key, and value
-        self.q_proj = nn.Linear(
-            config.n_embd, config.n_embd, bias=config.bias or config.use_qkv_bias
-        )
-        self.kv_proj = nn.Linear(
-            config.n_embd,
-            2 * config.n_embd // (config.n_head // config.n_kv_head),
-            bias=config.bias or config.use_qkv_bias,
-        )
-
-        # Output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-
         # RMSNorm before q and k projections
         if config.rmsnorm_before_qk:
             self.q_norm = RMSNorm(self.head_dim)
@@ -103,6 +90,21 @@ class Attention(nn.Module):
                 1, 1, config.block_size, config.block_size
             ),
         )
+
+        self.set_layers(config)
+
+    def set_layers(self, config):
+        # Projections for query, key, and value
+        self.q_proj = nn.Linear(
+            config.n_embd, config.n_embd, bias=config.bias or config.use_qkv_bias
+        )
+        self.kv_proj = nn.Linear(
+            config.n_embd,
+            2 * config.n_embd // (config.n_head // config.n_kv_head),
+            bias=config.bias or config.use_qkv_bias,
+        )
+        # Output projection
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
 
     def forward(self, x, q=None, mask=None):
         B, T, C = x.size()
@@ -192,7 +194,7 @@ class Attention(nn.Module):
             q,
             k,
             v,
-            attn_mask=None,
+            attn_mask=self.mask,
             dropout_p=self.dropout if self.training else 0,
             is_causal=True,
         )
@@ -214,10 +216,12 @@ class Attention(nn.Module):
 class PattentionSelfAttention(Attention):
     def __init__(self, config):
         super().__init__(config)
+
+    def set_layers(self, config):
         self.q_proj = Pattention(config)
         self.k_proj = Pattention(config)
         self.v_proj = Pattention(config)
-        self.kv_proj = None
+        self.c_proj = Pattention(config)
 
     def _project_kv(self, x, B, T):
         k = self.k_proj(x).view(B, T, self.n_head, self.head_dim)

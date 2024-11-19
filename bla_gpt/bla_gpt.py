@@ -7,26 +7,6 @@ https://github.com/openai/gpt-2/blob/master/src/model.py
 https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
 """
 
-"""
-- Use GeGLU instead of GLU
-- Grouped Query Attention
-- Cap logits in attention
-- Share embedding weights and output weights
-- QKV Bias
-- Soft attention logit capping
-- Rotary Position Embedding
-- zero-init projection layers
-- Differential Attention - ❗OOM
-- RMSNorm before attention for Query and Key
-- Pre and post RMS norm
-
-
-- Do you use regular pos embedding when rotary is on?
-- What is the order of rotary embeddings and the rms norm in attention?
-- Check the Rotary embedding implementation and run some tests in attentino layers
-
-"""
-
 import inspect
 import math
 from dataclasses import dataclass
@@ -74,9 +54,9 @@ class GPTConfig(Coqpit):
     zero_init_proj_layers: bool = True
     rmsnorm_before_qk: bool = True
     pos_encoding: bool = "rotary"
-    use_res_weights: bool = True
+    use_res_weights: bool = False
     use_qkv_bias: bool = True
-    use_pre_post_norm: bool = False
+    use_pre_post_norm: bool = True
 
 
 @dataclass
@@ -103,15 +83,14 @@ class TokenformerConfig(Coqpit):
     use_soft_logit_capping: bool = False
     n_kv_head: int = 12  # Number of heads for the key and value (Grouped Query Attention), if n_kv_head == n_head, it is full attention
     tie_embed_weights: bool = True
-    zero_init_proj_layers: bool = True
+    zero_init_proj_layers: bool = False
     rmsnorm_before_qk: bool = True
     pos_encoding: bool = "rotary"
-    use_res_weights: bool = True
-    use_qkv_bias: bool = True
-    use_pre_post_norm: bool = False
+    use_res_weights: bool = False
+    use_pre_post_norm: bool = True
 
     # pattention parameters
-    param_token_num: int = 768
+    param_token_num: int = 1024
 
 
 def get_attention(config, depth=None):

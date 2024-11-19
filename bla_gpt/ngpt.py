@@ -1,500 +1,357 @@
-# https://github.com/lucidrains/nGPT-pytorch/
-
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-from functools import partial
+# from https://github.com/NVIDIA/ngpt/blob/main/model.py
+import inspect
+import math
+from dataclasses import dataclass
 
 import torch
-import torch.nn.functional as F
-from coqpit import Coqpit
-from einops import einsum, rearrange
-from einops.layers.torch import Rearrange
-from rotary_embedding_torch import RotaryEmbedding
-from torch import nn
-from torch.nn import Module, ModuleList
-
-# constants
-from torch.nn.attention import SDPBackend
-from torch.nn.utils.parametrize import register_parametrization
-from utils import register_model
-
-SDP_BACKEND_MAP = dict(
-    enable_flash=SDPBackend.FLASH_ATTENTION,
-    enable_mem_efficient=SDPBackend.EFFICIENT_ATTENTION,
-    enable_math=SDPBackend.MATH,
-    enable_cudnn=SDPBackend.CUDNN_ATTENTION,
-)
-
-# functions
-
-
-def exists(v):
-    return v is not None
-
-
-def default(v, d):
-    return v if exists(v) else d
-
-
-def cast_tuple(t, length=1):
-    out = t if isinstance(t, tuple) else ((t,) * length)
-    assert len(out) == length
-    return out
-
-
-def l2norm(t, dim=-1, norm_eps=0.0, eps=None, groups=1):
-    eps = default(eps, 1e-5 if t.dtype == torch.float16 else 1e-10)
-
-    if groups > 1:
-        t = t.chunk(groups, dim=dim)
-        t = torch.stack(t)
-
-    if norm_eps == 0.0:
-        out = F.normalize(t, dim=dim, p=2, eps=eps)
-    else:
-        norm = t.norm(dim=dim, keepdim=True)
-        target_norm = norm.detach().clamp(min=1.0 - norm_eps, max=1.0 + norm_eps)
-        divisor = norm / target_norm
-        out = t / divisor.clamp(min=eps)
-
-    if groups > 1:
-        out = torch.cat([*out], dim=dim)
-
-    return out
-
-
-# scale
-
-
-class Scale(Module):
-    """
-    latter part of section 2.5 in the paper
-    """
-
-    def __init__(self, dim, init=1.0, scale=1.0):
-        super().__init__()
-        self.scale = nn.Parameter(torch.ones(dim) * scale)
-        self.forward_scale = init / scale
-
-    def forward(self):
-        return self.scale * self.forward_scale
-
-
-# residual slerp update with learned scale
-
-
-class Residual(Module):
-    def __init__(self, fn: Module, dim: int, init: float, scale: float):
-        super().__init__()
-        self.fn = fn
-        self.branch_scale = Scale(dim, init, default(scale, dim**-0.5))
-
-    def forward(self, x, **kwargs):
-        residual = x
-
-        branch_out = l2norm(self.fn(x, **kwargs))
-        out = l2norm(residual.lerp(branch_out, self.branch_scale()))
-
-        return out
-
-
-# for use with parametrize
-
-
-class L2Norm(Module):
-    def __init__(self, dim=-1, norm_eps=0.0, groups=1):
-        super().__init__()
-        self.dim = dim
-        self.norm_eps = norm_eps
-        self.groups = groups
-
-    def forward(self, t):
-        return l2norm(t, dim=self.dim, norm_eps=self.norm_eps, groups=self.groups)
-
-
-class NormLinear(Module):
-    def __init__(
-        self, dim, dim_out, norm_dim_in=True, parametrize=True, norm_eps=0.0, groups=1
-    ):
-        super().__init__()
-        self.linear = nn.Linear(dim, dim_out, bias=False)
-
-        self.scale = groups**-1
-        self.parametrize = parametrize
-        self.l2norm = L2Norm(
-            dim=-1 if norm_dim_in else 0, norm_eps=norm_eps, groups=groups
-        )
-
-        if parametrize:
-            register_parametrization(self.linear, "weight", self.l2norm)
-
-        self.norm_weights_()
-
-    @torch.no_grad()
-    def norm_weights_(self):
-        if self.parametrize:
-            normed = self.weight
-            original = self.linear.parametrizations.weight.original
-
-            original.copy_(normed)
-        else:
-            self.weight.copy_(self.l2norm(self.weight))
-
-    @property
-    def weight(self):
-        return self.linear.weight
-
-    def forward(self, x):
-        return self.linear(x) * self.scale
-
-
-# attention
-
-
-class Attention(Module):
-    def __init__(
-        self,
-        dim,
-        *,
-        dim_head=None,
-        heads=8,
-        norm_qk=True,
-        causal=True,
-        manual_norm_weights=False,
-        s_qk_init=1.0,
-        s_qk_scale=None,
-        flash_kwargs: dict = dict(
-            enable_flash=True, enable_math=True, enable_mem_efficient=True
-        ),
-        norm_eps=0.0,
-        num_hyperspheres=1,
-    ):
-        super().__init__()
-        self.heads = heads
-        self.causal = causal
-
-        if dim_head is None:
-            dim_head = dim // heads
-
-        NormLinear_ = partial(
-            NormLinear,
-            parametrize=not manual_norm_weights,
-            norm_eps=norm_eps,
-            groups=num_hyperspheres,
-        )
-        self.l2norm = partial(l2norm, norm_eps=norm_eps, groups=num_hyperspheres)
-
-        dim_sqrt = dim**0.5
-        self.dim_sqrt = dim_sqrt
-        self.attn_scale = dim_head**0.5
-
-        dim_inner = dim_head * heads
-        self.to_q = NormLinear_(dim, dim_inner)
-        self.to_k = NormLinear_(dim, dim_inner)
-        self.to_v = NormLinear_(dim, dim_inner)
-
-        # flash attention related context manager
-
-        sdpa_backends = [
-            SDP_BACKEND_MAP[enable_str]
-            for enable_str, enable in flash_kwargs.items()
-            if enable
-        ]
-        self.sdpa_context_manager = partial(
-            torch.nn.attention.sdpa_kernel, sdpa_backends
-        )
-
-        # rotary
-
-        self.rotary_emb = RotaryEmbedding(dim_head)
-
-        # qk rmsnorm + scale
-
-        self.norm_qk = norm_qk
-        self.q_scale = Scale(dim, s_qk_init, default(s_qk_scale, dim**-0.5))
-        self.k_scale = Scale(dim, s_qk_init, default(s_qk_scale, dim**-0.5))
-
-        self.split_heads = Rearrange("b n (h d) -> b h n d", h=heads)
-        self.merge_heads = Rearrange("b h n d -> b n (h d)")
-
-        self.to_out = NormLinear_(dim_inner, dim, norm_dim_in=False)
-
-    def forward(self, x, mask=None):
-        q, k, v = self.to_q(x), self.to_k(x), self.to_v(x)
-
-        # split heads
-
-        q, k, v = map(self.split_heads, (q, k, v))
-
-        # maybe query key norm
-
-        if self.norm_qk:
-            q, k = map(self.l2norm, (q, k))
-
-        # scaling queries and keys - this would line up with the popular use of qk rmsnorm from google deepmind and now black forest labs - will use multihead rmsnorm
-
-        q = q * rearrange(self.q_scale(), "(h d) -> h 1 d", h=self.heads)
-        k = k * rearrange(self.k_scale(), "(h d) -> h 1 d", h=self.heads)
-
-        # rotary positions
-
-        q = self.rotary_emb.rotate_queries_or_keys(q)
-        k = self.rotary_emb.rotate_queries_or_keys(k)
-
-        # for non-autoregressive masking
-
-        if exists(mask):
-            mask = rearrange(mask, "b j -> b 1 1 j")
-
-        # scale is sqrt(dk)
-
-        with self.sdpa_context_manager():
-            out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=mask, is_causal=self.causal, scale=self.attn_scale
-            )
-
-        out = self.merge_heads(out)
-        return self.to_out(out)
-
-
-# feedforward
-
-
-class FeedForward(Module):
-    def __init__(
-        self,
-        dim,
-        *,
-        expand_factor=4,
-        manual_norm_weights=False,
-        s_hidden_init=1.0,
-        s_hidden_scale=1.0,
-        s_gate_init=1.0,
-        s_gate_scale=1.0,
-        norm_eps=0.0,
-        num_hyperspheres=1,
-    ):
-        super().__init__()
-        NormLinear_ = partial(
-            NormLinear,
-            parametrize=not manual_norm_weights,
-            norm_eps=norm_eps,
-            groups=num_hyperspheres,
-        )
-
-        self.dim = dim
-        dim_inner = int(dim * expand_factor * 2 / 3)
-
-        self.to_hidden = NormLinear_(dim, dim_inner)
-        self.to_gate = NormLinear_(dim, dim_inner)
-
-        self.hidden_scale = Scale(dim_inner, s_hidden_init, s_hidden_scale)
-        self.gate_scale = Scale(dim_inner, s_gate_init, s_gate_scale)
-
-        self.to_out = NormLinear_(dim_inner, dim, norm_dim_in=False)
-
-    def forward(self, x):
-        hidden, gate = self.to_hidden(x), self.to_gate(x)
-
-        hidden = hidden * self.hidden_scale()
-        gate = gate * self.gate_scale() * (self.dim**0.5)
-
-        hidden = F.silu(gate) * hidden
-        return self.to_out(hidden)
-
-
-# classes
-@dataclass
-class nGPTConfig(Coqpit):
-    block_size: int = 1024
-    vocab_size: int = 50304  # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
-    dim: int = 768
-    n_layer: int = 8
-    n_head: int = 8
-    dim_head: int | None = None
-    attn_norm_qk: bool = True  # they say the query/key normalization is optional
-    ff_expand_factor: float = 4.0
-    ce_ignore_index: int = -1
-    manual_norm_weights: bool = False
-    tied_embedding: bool = False
-    num_hyperspheres: int = 1
-    causal: bool = True
-
-    # below are all the scale related hyperparameters, for controlling effective relative learning rates throughout the network
-    alpha_init: float | None = (
-        None  # this would set the alpha init for all residuals, but would be overridden by alpha_attn_init and alpha_ff_init if they are specified
+import torch.nn as nn
+from flash_attn import flash_attn_func
+from torch.nn import functional as F
+
+
+def apply_rotary_position_embeddings(sinusoidal_pos, q, k):
+    # Split the sinusoidal_pos into sin and cos parts
+    sin, cos = sinusoidal_pos.chunk(2, dim=-1)
+    # Apply the rotary embeddings to the query and key
+    q_rot = torch.stack((-q[..., 1::2], q[..., ::2]), dim=-1)
+    k_rot = torch.stack((-k[..., 1::2], k[..., ::2]), dim=-1)
+    q_rot = torch.reshape(q_rot, q.shape[:-1] + (q.shape[-1] // 2, 2)) * torch.stack(
+        (cos, sin), dim=-1
     )
-    s_logit_init: float = 1.0
-    s_logit_scale: float | None = None
-    alpha_attn_init: float | tuple[float, ...] | None = None
-    alpha_attn_scale: float | tuple[float, ...] | None = None
-    alpha_ff_init: float | tuple[float, ...] | None = None
-    alpha_ff_scale: float | tuple[float, ...] | None = None
-    s_qk_init: float | tuple[float, ...] = 1.0
-    s_qk_scale: float | tuple[float, ...] | None = None
-    s_ff_hidden_init: float | tuple[float, ...] = 1.0
-    s_ff_hidden_scale: float | tuple[float, ...] = 1.0
-    s_ff_gate_init: float | tuple[float, ...] = 1.0
-    s_ff_gate_scale: float | tuple[float, ...] = 1.0
-    attn_flash_kwargs: dict = field(
-        default_factory=lambda: {
-            "enable_flash": True,
-            "enable_math": True,
-            "enable_mem_efficient": True,
-        }
+    k_rot = torch.reshape(k_rot, k.shape[:-1] + (k.shape[-1] // 2, 2)) * torch.stack(
+        (cos, sin), dim=-1
     )
-    norm_eps: float = 0.0  # greater than 0 allows the norm to be around (1. - norm_eps) to (1. + norm_eps)
+    q_rot = torch.reshape(q_rot, q.shape)
+    k_rot = torch.reshape(k_rot, k.shape)
+    return q_rot, k_rot
 
 
-class nGPT(Module):
-    def __init__(
-        self,
-        config,
-    ):
+def get_sinusoidal_embeddings(n_positions, dim):
+    """Generate sinusoidal positional embeddings."""
+    position = torch.arange(n_positions, dtype=torch.float).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, dim, 2).float() * (-math.log(10000.0) / dim))
+    sinusoidal_emb = torch.zeros((n_positions, dim))
+    sinusoidal_emb[:, 0::2] = torch.sin(position * div_term)
+    sinusoidal_emb[:, 1::2] = torch.cos(position * div_term)
+    return sinusoidal_emb
+
+
+class Block(nn.Module):
+    def __init__(self, config, iblock):
         super().__init__()
         self.config = config
-        NormLinear_ = partial(
-            NormLinear,
-            parametrize=not config.manual_norm_weights,
-            norm_eps=config.norm_eps,
-            groups=config.num_hyperspheres,
+
+        self.key = nn.Linear(
+            config.n_embd, config.n_embd, bias=config.bias, dtype=torch.bfloat16
         )
-        self.l2norm = partial(
-            l2norm, norm_eps=config.norm_eps, groups=config.num_hyperspheres
+        self.query = nn.Linear(
+            config.n_embd, config.n_embd, bias=config.bias, dtype=torch.bfloat16
         )
-
-        self.dim = config.dim
-        self.causal = config.causal
-        alpha_init = default(config.alpha_init, 1.0 / config.n_layer)
-
-        self.token_embed = NormLinear_(config.dim, config.vocab_size)
-
-        self.layers = ModuleList([])
-
-        scale_hparams = (
-            config.alpha_attn_init,
-            config.alpha_attn_scale,
-            config.alpha_ff_init,
-            config.alpha_ff_scale,
-            config.s_qk_init,
-            config.s_qk_scale,
-            config.s_ff_hidden_init,
-            config.s_ff_hidden_scale,
-            config.s_ff_gate_init,
-            config.s_ff_gate_scale,
+        self.value = nn.Linear(
+            config.n_embd, config.n_embd, bias=config.bias, dtype=torch.bfloat16
+        )
+        self.att_c_proj = nn.Linear(
+            config.n_embd, config.n_embd, bias=config.bias, dtype=torch.bfloat16
         )
 
-        scale_hparams = tuple(
-            cast_tuple(hparam, config.n_layer) for hparam in scale_hparams
+        self.c_fc = nn.Linear(
+            config.n_embd, 2 * 4 * config.n_embd, bias=config.bias, dtype=torch.bfloat16
+        )
+        self.silu = nn.SiLU()
+        self.mlp_c_proj = nn.Linear(
+            4 * config.n_embd, config.n_embd, bias=config.bias, dtype=torch.bfloat16
         )
 
-        for (
-            alpha_attn_init_,
-            alpha_attn_scale_,
-            alpha_ff_init_,
-            alpha_ff_scale_,
-            s_qk_init_,
-            s_qk_scale_,
-            s_ff_hidden_init_,
-            s_ff_hidden_scale_,
-            s_ff_gate_init_,
-            s_ff_gate_scale_,
-        ) in zip(*scale_hparams):
-            attn = Attention(
-                config.dim,
-                dim_head=config.dim_head,
-                heads=config.n_head,
-                causal=config.causal,
-                norm_qk=config.attn_norm_qk,
-                manual_norm_weights=config.manual_norm_weights,
-                s_qk_init=s_qk_init_,
-                s_qk_scale=s_qk_scale_,
-                flash_kwargs=config.attn_flash_kwargs,
-                norm_eps=config.norm_eps,
-                num_hyperspheres=config.num_hyperspheres,
+        if config.use_nGPT == 0:
+            self.rmsnorm_att = RMSNorm(config.n_embd)
+            self.rmsnorm_mlp = RMSNorm(config.n_embd)
+
+        if config.use_nGPT == 1:
+            self.attn_alpha_init_value = 0.05
+            self.attn_alpha_init_scaling = config.base_scale
+            self.attn_alpha = torch.nn.Parameter(
+                self.attn_alpha_init_scaling
+                * torch.ones(self.config.n_embd, dtype=torch.float32)
             )
 
-            ff = FeedForward(
-                config.dim,
-                expand_factor=config.ff_expand_factor,
-                manual_norm_weights=config.manual_norm_weights,
-                s_hidden_init=s_ff_hidden_init_,
-                s_hidden_scale=s_ff_hidden_scale_,
-                s_gate_init=s_ff_gate_init_,
-                s_gate_scale=s_ff_gate_scale_,
-                norm_eps=config.norm_eps,
-                num_hyperspheres=config.num_hyperspheres,
+            self.mlp_alpha_init_value = 0.05
+            self.mlp_alpha_init_scaling = config.base_scale
+            self.mlp_alpha = torch.nn.Parameter(
+                self.mlp_alpha_init_scaling
+                * torch.ones(self.config.n_embd, dtype=torch.float32)
             )
 
-            attn_with_residual = Residual(
-                attn,
-                config.dim,
-                default(alpha_attn_init_, alpha_init),
-                default(alpha_attn_scale_, config.dim**-0.5),
+            self.sqk_init_value = 1.0
+            self.sqk_init_scaling = config.base_scale
+            self.sqk = torch.nn.Parameter(
+                self.sqk_init_scaling
+                * torch.ones(self.config.n_embd, dtype=torch.float32)
             )
 
-            ff_with_residual = Residual(
-                ff,
-                config.dim,
-                default(alpha_ff_init_, alpha_init),
-                default(alpha_ff_scale_, config.dim**-0.5),
+            self.suv_init_value = 1.0
+            self.suv_init_scaling = 1.0
+            self.suv = torch.nn.Parameter(
+                self.suv_init_scaling
+                * torch.ones(2 * 4 * config.n_embd, dtype=torch.float32)
             )
 
-            self.layers.append(ModuleList([attn_with_residual, ff_with_residual]))
+    def justnorm(self, x):
+        # return F.normalize(x, p=2, dim=-1)
+        res = x / x.norm(p=2, dim=-1, keepdim=True)
+        return res
 
-        self.to_logits = (
-            NormLinear_(config.dim, config.vocab_size)
-            if not config.tied_embedding
-            else None
+    def forward(self, h):
+        B, T, C = h.size()
+
+        hin = h
+        if self.config.use_nGPT == 0:
+            hin = self.rmsnorm_att(h)
+
+        q = self.query(hin)
+        k = self.key(hin)
+        v = self.value(hin)
+
+        q = q.view(B, T, self.config.n_head, self.config.n_embd // self.config.n_head)
+        k = k.view(B, T, self.config.n_head, self.config.n_embd // self.config.n_head)
+        v = v.view(B, T, self.config.n_head, self.config.n_embd // self.config.n_head)
+
+        sinusoidal_pos = get_sinusoidal_embeddings(
+            T, self.config.n_embd // self.config.n_head
+        ).to(device=q.device)
+        q, k = apply_rotary_position_embeddings(
+            sinusoidal_pos, q.transpose(1, 2), k.transpose(1, 2)
         )
+        q = q.transpose(2, 1)
+        k = k.transpose(2, 1)
 
-        self.logit_scale = Scale(
-            config.vocab_size,
-            config.s_logit_init,
-            default(config.s_logit_scale, config.dim**-0.5),
+        if self.config.use_nGPT == 1:
+            sqk = (self.sqk * (self.sqk_init_value / self.sqk_init_scaling)).view(
+                1, 1, self.config.n_head, self.config.n_embd // self.config.n_head
+            )
+            q = sqk * self.justnorm(q)
+            k = sqk * self.justnorm(k)
+
+        sqrt_head_dim = (self.config.n_embd / self.config.n_head) ** 0.5
+        if self.config.use_nGPT == 0:
+            softmax_scale = 1.0 / sqrt_head_dim
+        if self.config.use_nGPT == 1:
+            softmax_scale = sqrt_head_dim
+        y = flash_attn_func(
+            q.to(dtype=torch.bfloat16),
+            k.to(dtype=torch.bfloat16),
+            v.to(dtype=torch.bfloat16),
+            dropout_p=0.0,
+            softmax_scale=softmax_scale,
+            causal=True,
+            window_size=(-1, -1),
+            alibi_slopes=None,
+            deterministic=True,
         )
+        y = y.to(dtype=q.dtype)
+        y = y.contiguous().view(B, T, self.config.n_embd)
 
-        self.ignore_index = config.ce_ignore_index
+        h_att = self.att_c_proj(y)
 
-    @torch.no_grad()
-    def norm_weights_(self):
-        for module in self.modules():
-            if not isinstance(module, NormLinear):
-                continue
+        if self.config.use_nGPT == 0:
+            h = h + h_att
+        if self.config.use_nGPT == 1:
+            lr = self.attn_alpha * (
+                self.attn_alpha_init_value / self.attn_alpha_init_scaling
+            )
+            lr = torch.abs(lr)
 
-            module.norm_weights_()
+            A_norm = self.justnorm(h)  # normally, normalization is not needed
+            B_norm = self.justnorm(h_att)
+
+            # res = (1.0 - lr) * A_norm + lr * B_norm
+            res = A_norm + lr * (B_norm - A_norm)
+            h = self.justnorm(res)
+
+        hin = h
+        if self.config.use_nGPT == 0:
+            hin = self.rmsnorm_mlp(h)
+        uv = self.c_fc(hin)
+        if self.config.use_nGPT == 1:
+            suv = self.suv * (
+                (self.suv_init_value / self.suv_init_scaling)
+                * (self.config.n_embd**0.5)
+            )
+            uv = suv * uv
+        u, v = torch.chunk(uv, 2, dim=-1)
+        x_mlp = u * self.silu(v)
+        h_mlp = self.mlp_c_proj(x_mlp)
+
+        if self.config.use_nGPT == 0:
+            h = h + h_mlp
+        if self.config.use_nGPT == 1:
+            lr = self.mlp_alpha * (
+                self.mlp_alpha_init_value / self.mlp_alpha_init_scaling
+            )
+            lr = torch.abs(lr)
+
+            A_norm = self.justnorm(h)  # normally, normalization is not needed
+            B_norm = self.justnorm(h_mlp)
+
+            # res = (1.0 - lr) * A_norm + lr * B_norm
+            res = A_norm + lr * (B_norm - A_norm)
+            h = self.justnorm(res)
+
+        return h
+
+
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304  # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    base_scale: float = 1.0 / (768.0**0.5)  # 1 / sqrt(n_embd)
+    use_nGPT: int = 1
+    dropout: float = 0.0
+    bias: bool = False
+
+
+class RMSNorm(torch.nn.Module):
+    def __init__(self, embdim: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(embdim))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dtype = x.dtype
+        x = x.float()
+        norm = torch.mean(x * x, dim=-1, keepdim=True)
+        xnorm = x * torch.rsqrt(norm + self.eps)
+        xnorm = xnorm.to(dtype=dtype)
+        return xnorm * self.weight
+
+
+class GPT(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+
+        self.transformer = nn.ModuleDict(
+            dict(
+                wte=nn.Embedding(config.vocab_size, config.n_embd),
+                drop=nn.Dropout(config.dropout),
+                h=nn.ModuleList([Block(config, il) for il in range(config.n_layer)]),
+            )
+        )
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        # *we don't use it becuase in the nGPT paper there was no weight tying of weights*
+        # self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith("c_proj.weight"):
+                torch.nn.init.normal_(
+                    p, mean=0.0, std=config.base_scale / math.sqrt(2 * config.n_layer)
+                )
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
+
+        if config.use_nGPT == 1:
+            self.sz_init_value = 1.00
+            self.sz_init_scaling = config.base_scale
+            self.sz = torch.nn.Parameter(
+                self.sz_init_scaling
+                * torch.ones(config.vocab_size, dtype=torch.float32)
+            )
+
+        if config.use_nGPT == 0:
+            self.rmsnorm_f = RMSNorm(config.n_embd)
+
+    def get_num_params(self, non_embedding=True):
+        """
+        Return the number of parameters in the model.
+        For non-embedding count (default), the position embeddings get subtracted.
+        The token embeddings would too, except due to the parameter sharing these
+        params are actually used as weights in the final layer, so we include them.
+        """
+        n_params = sum(p.numel() for p in self.parameters())
+        # if non_embedding:
+        #    n_params -= self.transformer.wpe.weight.numel()
+        return n_params
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=self.config.base_scale)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=self.config.base_scale)
 
     def forward(self, idx, targets=None):
-        token_embed = self.token_embed.weight
+        device = idx.device
+        b, t = idx.size()
+        # assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
+
+        x = tok_emb
+        for block in self.transformer.h:
+            x = block(x)
+
+        if self.config.use_nGPT == 0:
+            x = self.rmsnorm_f(x)
 
         if targets is not None:
-            assert self.causal
-
-        tokens = token_embed[idx]
-
-        for attn, ff in self.layers:
-            tokens = attn(tokens)
-            tokens = ff(tokens)
-
-        if exists(self.to_logits):
-            logits = self.to_logits(tokens)
+            logits = self.lm_head(x)
+            if self.config.use_nGPT == 1:
+                sz = self.sz * (self.sz_init_value / self.sz_init_scaling)
+                logits = sz * logits
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
+            )
         else:
-            # tied embeddings
-            logits = einsum(tokens, token_embed, "b n d, c d -> b n c")
-
-        logits = logits * self.logit_scale()
-
-        if targets is None:
-            return logits
-
-        loss = F.cross_entropy(
-            logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
-        )
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(
+                x[:, [-1], :]
+            )  # note: using list [-1] to preserve the time dim
+            if self.config.use_nGPT == 1:
+                sz = self.sz * (self.sz_init_value / self.sz_init_scaling)
+                logits = sz * logits
+            loss = None
 
         return logits, loss
 
-
-@register_model
-def register_ngpt():
-    return nGPTConfig, nGPT
+    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+        # start with all of the candidate parameters
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        # filter out those that do not require grad
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": nodecay_params, "weight_decay": 0.0},
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        print(
+            f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters"
+        )
+        print(
+            f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters"
+        )
+        # Create AdamW optimizer and use the fused version if it is available
+        fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = False  # fused_available and device_type == 'cuda'
+        extra_args = dict(fused=True) if use_fused else dict()
+        optimizer = torch.optim.AdamW(
+            optim_groups, lr=learning_rate, betas=betas, **extra_args
+        )
+        print(f"using fused AdamW: {use_fused}")
+        return optimizer

@@ -163,7 +163,7 @@ if __name__ == "__main__":
                 "weight_decay": 0.0,
             }
         )
-        learning_rate: float = 0.0018
+        learning_rate: float = 0.001
         warmup_iters: int = 250
         warmdown_iters: int = 2000  # number of iterations of linear warmup/warmdown for triangular or trapezoidal schedule
 
@@ -177,7 +177,7 @@ if __name__ == "__main__":
         )
 
         # checkpoint params
-        keep_last_n_checkpoints: int = 5  # number of checkpoints to keep
+        keep_last_n_checkpoints: int = 1  # number of checkpoints to keep
         save_best_model: bool = True  # whether to save best model based on val loss
 
     args = Hyperparameters()
