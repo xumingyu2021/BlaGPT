@@ -92,8 +92,6 @@ class Shortening(nn.Module):
         if config.shortening_method == "attention":
             self.proj = nn.Linear(shorten_factor * config.n_embd, config.n_embd)
             self.attn = Attention(config)
-            self.norm = RMSNorm(config.n_embd)
-            self.ff = SwiGLU_MLP(config)
 
         # Store shift size to prevent information leaks
         self.shift_size = shorten_factor - 1
@@ -146,8 +144,6 @@ class Upsampling(nn.Module):
                 config.n_embd, self.shorten_factor * config.n_embd
             )
             self.attn = Attention(config)
-            self.norm = RMSNorm(config.n_embd)
-            self.ff = SwiGLU_MLP(config)
 
     def forward(
         self, x: torch.Tensor, orig_x: Optional[torch.Tensor] = None
@@ -165,9 +161,7 @@ class Upsampling(nn.Module):
             x_up = self.linear_up(x)
             x_up = x_up.view(batch_size, seq_len * self.shorten_factor, n_embd)
             x_up = x_up + orig_x
-            x_up = x_up + self.attn(self.norm(x_up))
-            x_up = x_up + self.ff(self.norm(x_up))
-
+            x_up = x_up + self.attn(x=x, q=x_up)
             return x_up
         else:
             raise ValueError(f"Unknown upsampling method: {self.method}")
