@@ -57,7 +57,7 @@ See one of the implementations for details.
 torchrun --standalone --nproc_per_node=8 train.py --run_name pre_post_norm --model_name blagpt
 ```
 
-# Acknowledgements
+## Acknowledgements
 
 The initial code is based on
 
