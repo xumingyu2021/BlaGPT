@@ -1,9 +1,9 @@
 # BlaGPT
 
-A collection of LM architectures, layers, and tricks to easily benchmark on a relatively small dataset. It is created fully for my experiments in my free time with no serious intentions. 
+A collection of LM architectures, layers, and tricks to easily benchmark on a relatively small dataset. It is created fully for my experiments in my free time with no serious intentions.
 
 ## BlaGPT Model
-BlaGPT is a flexible Transformer implementation that you can turn on/off following things in the config. 
+BlaGPT is a flexible Transformer implementation that you can turn on/off following things in the config.
 
 Multi-token prediction - [link](https://arxiv.org/pdf/2404.19737)
 
@@ -34,6 +34,8 @@ Zamba2 - [link](https://huggingface.co/Zyphra/Zamba2-2.7B) - Zamba2 > Rene > Rwk
 
 Hourglass Transformer (modified) - [link](https://arxiv.org/abs/2110.13711) - Hourglass > MegaByte > FTP
 
+Hymba - [link](https://arxiv.org/html/2411.13676v1)
+
 ## Optimizers
 PaLMForeachSOAP - [link](https://github.com/ClashLuke/HeavyBall) - almost 2 times slower than Adam but the best results
 
@@ -41,14 +43,14 @@ Ademamix - [link](https://github.com/nanowell/AdEMAMix-Optimizer-Pytorch/blob/ma
 
 Adopt - [link](https://github.com/iShohei220/adopt) - straight up Nan
 
-## Adding a New Model 
+## Adding a New Model
 
 - Implement the model
 - Return the loss in the forward function
 - Register the model
 - And start training
 
-See one of the implementations for details. 
+See one of the implementations for details.
 
 
 ## Training

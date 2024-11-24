@@ -4,10 +4,3 @@ torch
 tiktoken
 datasets
 coqpit
-
-#ngpt
-einops
-rotary_embedding_torch
-
-# causal_conv1d
-# mamba_ssm
