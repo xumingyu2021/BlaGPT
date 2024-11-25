@@ -55,6 +55,10 @@ See one of the implementations for details.
 
 ## Training
 
+- Get the data by running `data/fineweb10B_cached.py`
+
+- Start training with:
+
 ```bash
 torchrun --standalone --nproc_per_node=8 train.py --run_name pre_post_norm --model_name blagpt
 ```
