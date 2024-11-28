@@ -21,6 +21,10 @@ Post and pre-RMSNorm - [link](https://arxiv.org/pdf/2408.00118)
 
 Tokenformer - [link](https://github.com/Haiyang-W/TokenFormer)
 
+Setting base theta to 1_000_000 - [llama3](https://github.com/meta-llama/llama3/blob/main/llama/model.py#L49)
+
+Z-loss regularization - [link](https://arxiv.org/pdf/2309.14322)
+
 ## Other Models
 MegaByte - [link](https://arxiv.org/abs/2305.07185)
 

@@ -64,7 +64,7 @@ class Attention(nn.Module):
 
         # Rotary embeddings
         if config.pos_encoding == "rotary":
-            self.rotary = Rotary(self.head_dim)
+            self.rotary = Rotary(self.head_dim, base=config.rope_theta)
         elif config.pos_encoding == "relative":
             self.rel_pos_emb = nn.Parameter(
                 torch.zeros(2 * config.block_size - 1, self.head_dim)

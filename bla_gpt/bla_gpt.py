@@ -47,7 +47,7 @@ class GPTConfig(Coqpit):
 
     norm_layer: str = "rmsnorm"
     attention: str = "regular"
-    activation: str = "sweiglu"
+    activation: str = "swiglu"
     use_soft_logit_capping: bool = False
     n_kv_head: int = 4  # Number of heads for the key and value (Grouped Query Attention), if n_kv_head == n_head, it is full attention
     tie_embed_weights: bool = True
@@ -57,6 +57,8 @@ class GPTConfig(Coqpit):
     use_res_weights: bool = False
     use_qkv_bias: bool = True
     use_pre_post_norm: bool = True
+    rope_theta: float = 1000000.0
+    z_loss_weight: float = 1e-4
 
 
 @dataclass
@@ -91,6 +93,28 @@ class TokenformerConfig(Coqpit):
 
     # pattention parameters
     param_token_num: int = 1024
+
+
+def compute_z_loss(logits, dim=-1, eps=1e-20):
+    """
+    Compute z-loss regularization to prevent model from being too confident.
+
+    Args:
+        logits: Raw logits from model of shape [batch, seq_len, vocab_size]
+        dim: Dimension along which to compute z-loss (usually vocab dimension)
+        eps: Small constant for numerical stability
+
+    Returns:
+        z_loss: Scalar z-loss term to add to training loss
+    """
+    # Get log of the partition function (logsumexp)
+    log_z = torch.logsumexp(logits, dim=dim, keepdim=True)
+
+    # Compute mean of log_z squared
+    z_loss = torch.square(torch.max(log_z, torch.zeros_like(log_z)))
+    z_loss = torch.mean(z_loss)
+
+    return z_loss
 
 
 def get_attention(config, depth=None):
@@ -284,6 +308,17 @@ class GPT(nn.Module):
                 loss = F.cross_entropy(
                     logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
                 )
+
+                if self.config.z_loss_weight > 0.0:
+                    z_loss = compute_z_loss(logits)
+                    loss += self.config.z_loss_weight * z_loss
+
+                    # we need to see lm_loss and z_loss separately for logging
+                    loss = {
+                        "total": loss,
+                        "z_loss": z_loss.detach().item(),
+                        "lm_loss": loss.detach().item(),
+                    }
             else:
                 total_loss = 0
                 loss_dict = {}
@@ -308,6 +343,11 @@ class GPT(nn.Module):
                                 shifted_targets.reshape(-1),
                                 ignore_index=-1,
                             )
+
+                            if self.config.z_loss_weight > 0.0:
+                                z_loss = compute_z_loss(head_logits)
+                                loss += self.config.z_loss_weight * z_loss
+
                             total_loss += loss
                             loss_dict[f"head{i+1}"] = loss.detach().item()
 

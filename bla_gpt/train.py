@@ -144,7 +144,7 @@ if __name__ == "__main__":
     @dataclass
     class Hyperparameters(Coqpit):
         run_name: str = "nano_gpt+rms_norm+geglu+gqa+softcap"
-        compile_model: bool = False
+        compile_model: bool = True
         # data hyperparams
         input_bin: str = (
             "../data/fineweb10B/fineweb_train_*.bin"  # input .bin to train on
