@@ -19,26 +19,26 @@ Zero-init projection layer - [link](https://arxiv.org/abs/2407.10671)
 
 Post and pre-RMSNorm - [link](https://arxiv.org/pdf/2408.00118)
 
-Tokenformer - [link](https://github.com/Haiyang-W/TokenFormer)
+Setting base theta to 1_000_000 - [llama3](https://github.com/meta-llama/llama3/blob/main/llama/model.py#L49) - increased the final validation loss - best `3.3324`
 
-Setting base theta to 1_000_000 - [llama3](https://github.com/meta-llama/llama3/blob/main/llama/model.py#L49)
-
-Z-loss regularization - [link](https://arxiv.org/pdf/2309.14322)
+Z-loss regularization - [link](https://arxiv.org/pdf/2309.14322) - increased the final validation loss by 0.02 - best: `3.3527`
 
 ## Other Models
-MegaByte - [link](https://arxiv.org/abs/2305.07185)
+MegaByte - [link](https://arxiv.org/abs/2305.07185) - best: `3.810`
 
-FTP (heavily modified) - [link](https://arxiv.org/pdf/2410.18160)
+FTP (heavily modified) - [link](https://arxiv.org/pdf/2410.18160) - best: `3.901`
 
-Rene - [link](https://huggingface.co/cartesia-ai/Rene-v0.1-1.3b-pytorch)
+Rene - [link](https://huggingface.co/cartesia-ai/Rene-v0.1-1.3b-pytorch) - best: `3.340`
 
-Rwkv7 - [link](https://github.com/BlinkDL/RWKV-LM)
+Rwkv7 - [link](https://github.com/BlinkDL/RWKV-LM) - best: `4.450`
 
 Zamba2 - [link](https://huggingface.co/Zyphra/Zamba2-2.7B) - Zamba2 > Rene > Rwkv7
 
-Hourglass Transformer (modified) - [link](https://arxiv.org/abs/2110.13711) - Hourglass > MegaByte > FTP
+Hourglass Transformer (modified) - [link](https://arxiv.org/abs/2110.13711) - Hourglass > MegaByte > FTP - best: `3.710`
 
 Hymba - [link](https://arxiv.org/html/2411.13676v1) - train step time is significantly slower than the transformers. Best validation loss so far: `4.7505`
+
+Tokenformer (in BlaGPT model) - [link](https://github.com/Haiyang-W/TokenFormer) - best: `3.390`
 
 ## Optimizers
 PaLMForeachSOAP - [link](https://github.com/ClashLuke/HeavyBall) - almost 2 times slower than Adam but the best results
@@ -46,6 +46,14 @@ PaLMForeachSOAP - [link](https://github.com/ClashLuke/HeavyBall) - almost 2 time
 Ademamix - [link](https://github.com/nanowell/AdEMAMix-Optimizer-Pytorch/blob/main/AdEMAMix.py) - Unstable even after trying different learning rates.
 
 Adopt - [link](https://github.com/iShohei220/adopt) - straight up Nan
+
+CAdamW - [link](https://github.com/kyleliang919/C-Optim/blob/main/c_adamw.py) - best: `3.3517`
+
+AdamW with independent weight decay - [link](https://arxiv.org/pdf/2309.14322) - best: `3.320`
+
+Adam - best: `3.3224`
+
+AdamW - best: `3.3310`
 
 ## Adding a New Model
 

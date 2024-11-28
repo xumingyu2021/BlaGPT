@@ -187,6 +187,11 @@ if __name__ == "__main__":
     model_config, model = get_model(cli_args.model_name)
     model_config = model_config()
 
+    # Override Hyperparameters with matching model_config attributes
+    for key, value in model_config.to_dict().items():
+        if hasattr(args, key):
+            setattr(args, key, value)
+
     if cli_args.run_name:
         args.run_name = cli_args.run_name
 

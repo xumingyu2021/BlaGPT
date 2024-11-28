@@ -39,6 +39,12 @@ def get_optimizer(
         module = importlib.import_module("optimizers.adopt")
         optimizer = getattr(module, "ADOPT")
         return optimizer(parameters, lr=lr, **optimizer_params, decoupled=True)
+    elif optimizer_name.lower() == "adamw_indep":
+        module = importlib.import_module("optimizers.adamw_indep_weight_decay")
+        optimizer = getattr(module, "AdamW")
+    elif optimizer_name.lower() == "c_adamw":
+        module = importlib.import_module("optimizers.c_adamw")
+        optimizer = getattr(module, "AdamW")
     else:
         optimizer = getattr(torch.optim, optimizer_name)
     return optimizer(parameters, lr=lr, **optimizer_params)

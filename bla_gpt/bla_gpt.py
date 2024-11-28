@@ -9,7 +9,7 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/gp
 
 import inspect
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
@@ -37,7 +37,7 @@ class GPTConfig(Coqpit):
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.0
-    bias: bool = False  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
     # New multi-token prediction parameters
     n_predict: int = 1  # Number of future tokens to predict (1 = standard GPT)
@@ -55,10 +55,32 @@ class GPTConfig(Coqpit):
     rmsnorm_before_qk: bool = True
     pos_encoding: bool = "rotary"
     use_res_weights: bool = False
-    use_qkv_bias: bool = True
-    use_pre_post_norm: bool = True
-    rope_theta: float = 1000000.0
-    z_loss_weight: float = 1e-4
+    use_qkv_bias: bool = False  # from Qwen, for better length generalization. Not an issue with block_size=1024
+    use_pre_post_norm: bool = False  # from Qwen, for better training stability
+    rope_theta: float = 10000  # 1000000.0 in llama3 models
+
+    """About z-loss: instability occurs
+    when the logits diverge and become very negative, as
+    illustrated in Figure 4 for a 2.4M parameter model at
+    learning rate 0.1. In contrast to the attention logit
+    growth instability, this divergence occurs towards the
+    end of training. The mitigation proposed by Chowdhery et al.
+    [6] is to encourage log Z to remain close to
+    zero."""
+
+    z_loss_weight: float = 0.0  # 1e-4 from deepmind paper
+
+    # optimizer - overriding Hyperparameters
+    optimizer_name: str = (
+        "AdamW"  # check get_optimizer() in bla_gpt/optimizers/__init__.py
+    )
+    optimizer_args: dict = field(
+        default_factory=lambda: {
+            "betas": (0.9, 0.95),
+            "eps": 1e-8,
+            "weight_decay": 1e-4,
+        }
+    )
 
 
 @dataclass

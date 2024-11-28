@@ -1,4 +1,5 @@
 huggingface_hub
+transformers
 numpy
 torch
 tiktoken
