@@ -34,7 +34,7 @@ Zamba2 - [link](https://huggingface.co/Zyphra/Zamba2-2.7B) - Zamba2 > Rene > Rwk
 
 Hourglass Transformer (modified) - [link](https://arxiv.org/abs/2110.13711) - Hourglass > MegaByte > FTP
 
-Hymba - [link](https://arxiv.org/html/2411.13676v1)
+Hymba - [link](https://arxiv.org/html/2411.13676v1) - train step time is significantly slower than the transformers
 
 ## Optimizers
 PaLMForeachSOAP - [link](https://github.com/ClashLuke/HeavyBall) - almost 2 times slower than Adam but the best results
