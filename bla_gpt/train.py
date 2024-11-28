@@ -20,6 +20,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
 os.environ["NCCL_TIMEOUT"] = "1800"
 
+torch._dynamo.config.optimize_ddp = False
+torch.set_float32_matmul_precision("high")
+
 
 class TeeLogger:
     def __init__(self, filename):
@@ -141,7 +144,7 @@ if __name__ == "__main__":
     @dataclass
     class Hyperparameters(Coqpit):
         run_name: str = "nano_gpt+rms_norm+geglu+gqa+softcap"
-        compile_model: bool = True
+        compile_model: bool = False
         # data hyperparams
         input_bin: str = (
             "../data/fineweb10B/fineweb_train_*.bin"  # input .bin to train on
@@ -449,7 +452,9 @@ if __name__ == "__main__":
             x, y = train_loader.next_batch()
             # backward pass
             if i < train_accumulation_steps:
-                with model.no_sync():  # there's no need to sync gradients every accumulation step
+                with (
+                    model.no_sync()
+                ):  # there's no need to sync gradients every accumulation step
                     loss.backward()
             else:
                 loss.backward()  # just sync on the last step
