@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from attentions import (
     Attention,
+    KVShiftingAttention,
     MultiheadDiffAttn,
     PattentionSelfAttention,
     soft_cap,
@@ -146,6 +147,8 @@ def get_attention(config, depth=None):
         return MultiheadDiffAttn(config, depth)
     elif config.attention == "pattention":
         return PattentionSelfAttention(config)
+    elif config.attention == "kvshifting":
+        return KVShiftingAttention(config)
     raise ValueError(f"Unrecognized attention type {config.attention}")
 
 

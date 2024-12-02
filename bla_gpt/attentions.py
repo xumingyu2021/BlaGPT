@@ -229,6 +229,62 @@ class PattentionSelfAttention(Attention):
         return k, v
 
 
+class KVShiftingAttention(Attention):
+    def __init__(self, config):
+        super().__init__(config)
+
+        # Initialize KV shifting parameters
+        # Following paper's initialization: randomly initialize from U(0,1)
+        # and make them sum to 1
+        self.alpha1 = nn.Parameter(torch.rand(self.n_kv_head))
+        self.alpha2 = nn.Parameter(torch.ones(self.n_kv_head) - self.alpha1)
+        self.beta1 = nn.Parameter(torch.rand(self.n_kv_head))
+        self.beta2 = nn.Parameter(torch.ones(self.n_kv_head) - self.beta1)
+
+    def _shift_kv(self, x):
+        """Perform shifting operation on key/value tensors.
+        Shifts the sequence by padding a zero at the beginning and dropping last element.
+
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, n_kv_head, head_dim)
+
+        Returns:
+            Shifted tensor of same shape
+        """
+        # Get shifted version by padding front and removing last element
+        # Keep same dimensions by dropping last element after padding
+        x_shifted = F.pad(x[:, :-1], (0, 0, 0, 0, 1, 0))
+        return x_shifted
+
+    def _project_kv(self, x, B, T):
+        """Override parent's _project_kv to add KV shifting.
+
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            B: Batch size
+            T: Sequence length
+
+        Returns:
+            Tuple of processed key and value tensors
+        """
+        # Get initial K,V projections using parent method
+        kv = self.kv_proj(x).view(B, T, 2, self.n_kv_head, self.head_dim)
+        k, v = kv.unbind(dim=2)
+
+        # Get shifted versions
+        k_shifted = self._shift_kv(k)
+        v_shifted = self._shift_kv(v)
+
+        # Combine original and shifted versions with learned parameters
+        k = (
+            self.alpha1.view(1, 1, -1, 1) * k
+            + self.alpha2.view(1, 1, -1, 1) * k_shifted
+        )
+        v = self.beta1.view(1, 1, -1, 1) * v + self.beta2.view(1, 1, -1, 1) * v_shifted
+
+        return k, v
+
+
 """
 Differential Attention - WIP (Getting OOM)
 """

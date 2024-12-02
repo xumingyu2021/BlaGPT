@@ -23,6 +23,8 @@ Setting base theta to 1_000_000 - [llama3](https://github.com/meta-llama/llama3/
 
 Z-loss regularization - [link](https://arxiv.org/pdf/2309.14322) - increased the final validation loss by 0.02 - best: `3.3527`
 
+KV-Shifting attention - [link](https://arxiv.org/abs/2411.19574) - best: `3.331` - peak memory consumption: `42858 MiB`
+
 ## Other Models
 MegaByte - [link](https://arxiv.org/abs/2305.07185) - best: `3.810`
 
@@ -54,6 +56,43 @@ AdamW with independent weight decay - [link](https://arxiv.org/pdf/2309.14322) -
 Adam - best: `3.3224`
 
 AdamW - best: `3.3310`
+
+## Best Model So Far
+BlaGPT with the following configurations:
+
+```json
+{
+    "params": {
+      "norm_layer": "rmsnorm",
+      "attention": "GQA",
+      "activation": "swiglu",
+      "tie_embed_weights": true,
+      "zero_init_proj_layers": true,
+      "use_rotary_emb": true,
+      "rmsnorm_before_qk": true
+    },
+    "config": {
+      "block_size": 1024,
+      "vocab_size": 50304,
+      "n_layer": 12,
+      "n_head": 12,
+      "n_embd": 768,
+      "dropout": 0.0,
+      "bias": true,
+      "norm_layer": "rmsnorm",
+      "attention": "GQA",
+      "activation": "swiglu",
+      "use_soft_logit_capping": false,
+      "n_kv_head": 4,
+      "tie_embed_weights": true,
+      "zero_init_proj_layers": true,
+      "rmsnorm_before_qk": true,
+      "use_rotary_emb": true
+    },
+    "val_loss": 3.2993,
+    "memory_usage": 49403,
+  },
+```
 
 ## Adding a New Model
 
