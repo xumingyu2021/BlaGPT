@@ -285,6 +285,229 @@ class KVShiftingAttention(Attention):
         return k, v
 
 
+class DilatedAttention(Attention):  # TOOO SLOW !!
+    def __init__(
+        self,
+        config,
+    ):
+        """
+        Implements the dilated attention mechanism from the LongNet paper.
+
+        Args:
+            config: Configuration object with attention parameters
+            segment_sizes: List of window sizes for each dilated attention
+            dilation_rates: List of dilation rates corresponding to each segment size
+        """
+        super().__init__(config)
+        assert len(config.segment_sizes) == len(
+            config.dilation_rates
+        ), "Must provide same number of segment sizes and dilation rates"
+
+        self.segment_sizes = config.segment_sizes
+        self.dilation_rates = config.dilation_rates
+
+    def _get_dilated_indices(self, seq_len, segment_size, dilation_rate, num_heads):
+        """
+        Generate dilated indices for all heads at once.
+        Ensures output size is consistent with the input sequence length.
+        """
+        # Calculate how many tokens per segment after dilation
+        tokens_per_segment = math.ceil(segment_size / dilation_rate)
+
+        # Calculate number of segments
+        num_segments = math.ceil(seq_len / segment_size)
+
+        # Initialize indices for all heads
+        all_indices = []
+        for head in range(num_heads):
+            head_indices = []
+            offset = head % dilation_rate
+
+            # Generate indices for each segment
+            for seg in range(num_segments):
+                start_idx = seg * segment_size
+                # Generate base indices for this segment
+                seg_indices = torch.arange(
+                    start_idx + offset,
+                    min(start_idx + segment_size, seq_len),
+                    dilation_rate,
+                )
+                head_indices.append(seg_indices)
+
+            # Concatenate all segment indices
+            head_indices = torch.cat(head_indices)
+
+            # Pad or truncate to match sequence length
+            if len(head_indices) < seq_len:
+                padding = torch.full(
+                    (seq_len - len(head_indices),),
+                    seq_len - 1,
+                    dtype=head_indices.dtype,
+                )
+                head_indices = torch.cat([head_indices, padding])
+            else:
+                head_indices = head_indices[:seq_len]
+
+            all_indices.append(head_indices)
+
+        # Stack indices for all heads
+        return torch.stack(all_indices)  # (num_heads, seq_len)
+
+    def _dilate_qkv(self, qkv, segment_size, dilation_rate):
+        """
+        Apply dilation to query, key, or value tensor while maintaining sequence length.
+        """
+        batch_size, num_heads, seq_len, head_dim = qkv.shape
+        indices = self._get_dilated_indices(
+            seq_len, segment_size, dilation_rate, num_heads
+        )
+        indices = indices.to(qkv.device)
+
+        # Expand indices for batch and head dimensions
+        expanded_indices = (
+            indices.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, -1, head_dim)
+        )
+
+        # Gather along sequence length dimension
+        return torch.gather(qkv, 2, expanded_indices)
+
+    def _prepare_qkv(self, q, k, v):
+        """
+        Prepare query, key, and value tensors for dilated attention computation.
+        """
+        # First apply the standard preparation from parent class
+        q, k, v = super()._prepare_qkv(q, k, v)
+
+        dilated_outputs = []
+
+        # Process each segment size and dilation rate
+        for segment_size, dilation_rate in zip(self.segment_sizes, self.dilation_rates):
+            # Apply dilation to q, k, v while maintaining sequence length
+            q_dilated = self._dilate_qkv(q, segment_size, dilation_rate)
+            k_dilated = self._dilate_qkv(k, segment_size, dilation_rate)
+            v_dilated = self._dilate_qkv(v, segment_size, dilation_rate)
+
+            dilated_outputs.append((q_dilated, k_dilated, v_dilated))
+
+        return dilated_outputs
+
+    def _flash_attention(self, dilated_qkv):
+        """
+        Compute attention using flash attention for each dilated version.
+        """
+        outputs = []
+        attention_weights = []
+
+        for q, k, v in dilated_qkv:
+            # Compute attention with flash attention
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, dropout_p=self.dropout if self.training else 0, is_causal=True
+            )
+            outputs.append(out)
+
+            # Compute attention weights for dynamic weighting
+            with torch.no_grad():
+                attn_weights = torch.matmul(q, k.transpose(-2, -1)) * (
+                    1.0 / math.sqrt(k.size(-1))
+                )
+                attn_weights = attn_weights.softmax(dim=-1).mean(dim=(0, 1))
+                attention_weights.append(attn_weights.max().item())
+
+        # Compute dynamic weights based on attention scores
+        weights = torch.softmax(
+            torch.tensor(attention_weights, device=outputs[0].device), dim=0
+        )
+
+        # Combine outputs using dynamic weights
+        combined_output = sum(w * out for w, out in zip(weights, outputs))
+        return combined_output
+
+    def _manual_attention(self, dilated_qkv, T):
+        """
+        Compute attention manually for each dilated version.
+        """
+        outputs = []
+        attention_weights = []
+
+        for q, k, v in dilated_qkv:
+            # Compute attention scores
+            attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+
+            if self.soft_cap > 0:
+                attn = soft_cap(attn, self.soft_cap)
+
+            # Create causal mask for dilated attention
+            causal_mask = torch.ones_like(attn, dtype=torch.bool).triu_()
+            attn = attn.masked_fill(~causal_mask, float("-inf"))
+
+            # Compute attention weights
+            attn_probs = F.softmax(attn, dim=-1)
+            attn_probs = self.attn_dropout(attn_probs)
+
+            # Compute output
+            out = attn_probs @ v
+            outputs.append(out)
+
+            # Store attention weights for dynamic weighting
+            with torch.no_grad():
+                attention_weights.append(attn_probs.mean(dim=(0, 1)).max().item())
+
+        # Compute dynamic weights based on attention scores
+        weights = torch.softmax(
+            torch.tensor(attention_weights, device=outputs[0].device), dim=0
+        )
+
+        # Combine outputs using dynamic weights
+        combined_output = sum(w * out for w, out in zip(weights, outputs))
+        return combined_output
+
+    def forward(self, x, q=None, mask=None):
+        """
+        Forward pass for dilated attention.
+        """
+        B, T, C = x.size()
+        T_q = q.size(1) if q is not None else T
+
+        # Project inputs
+        q = self._project_query(q if q is not None else x, B, T_q)
+        k, v = self._project_kv(x, B, T)
+
+        # Apply normalization and positional encodings if configured
+        if hasattr(self, "q_norm"):
+            q, k = self._apply_norm(q, k)
+
+        if hasattr(self, "rotary"):
+            q, k = self._apply_rotary(q, k, T_q, T)
+        elif hasattr(self, "rel_pos_emb"):
+            q, k = self._apply_relative_pos(q, k, T_q, T)
+
+        # Prepare dilated attention inputs
+        dilated_qkv = self._prepare_qkv(q, k, v)
+
+        # Compute attention
+        if self.flash and self.soft_cap == 0:
+            y = self._flash_attention(dilated_qkv)
+        else:
+            y = self._manual_attention(dilated_qkv, T)
+
+        # Project output
+        return self._project_output(y, B, T_q, C)
+
+
+# Example usage:
+# config = DilatedConfig(
+#     n_embd=512,
+#     n_head=8,
+#     n_kv_head=8,
+#     block_size=1024,
+#     dilation_rate=2,
+#     segment_size=64,
+#     use_xpos=True,
+#     use_rel_pos_bias=True,
+#     qk_norm=True
+# )
+# dilated_attention = DilatedAttention(config)
+
 """
 Differential Attention - WIP (Getting OOM)
 """
