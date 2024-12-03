@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from attentions import (
     Attention,
+    DilatedAttention,
     KVShiftingAttention,
     MultiheadDiffAttn,
     PattentionSelfAttention,
@@ -60,6 +61,10 @@ class GPTConfig(Coqpit):
     use_pre_post_norm: bool = False  # from Qwen, for better training stability
     rope_theta: float = 10000  # 1000000.0 in llama3 models
 
+    # dilated attention parameters
+    segment_sizes: list[int] = field(default_factory=lambda: [64, 128, 256, 512, 1024])
+    dilation_rates: list[int] = field(default_factory=lambda: [1, 2, 4, 6, 12])
+
     """About z-loss: instability occurs
     when the logits diverge and become very negative, as
     illustrated in Figure 4 for a 2.4M parameter model at
@@ -73,13 +78,13 @@ class GPTConfig(Coqpit):
 
     # optimizer - overriding Hyperparameters
     optimizer_name: str = (
-        "AdamW"  # check get_optimizer() in bla_gpt/optimizers/__init__.py
+        "Adam"  # check get_optimizer() in bla_gpt/optimizers/__init__.py
     )
     optimizer_args: dict = field(
         default_factory=lambda: {
             "betas": (0.9, 0.95),
             "eps": 1e-8,
-            "weight_decay": 1e-4,
+            "weight_decay": 0.0,
         }
     )
 
@@ -149,6 +154,8 @@ def get_attention(config, depth=None):
         return PattentionSelfAttention(config)
     elif config.attention == "kvshifting":
         return KVShiftingAttention(config)
+    elif config.attention == "dilated":
+        return DilatedAttention(config)
     raise ValueError(f"Unrecognized attention type {config.attention}")
 
 
