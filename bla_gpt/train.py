@@ -17,7 +17,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
+os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
 os.environ["NCCL_TIMEOUT"] = "1800"
 
 torch._dynamo.config.optimize_ddp = False
