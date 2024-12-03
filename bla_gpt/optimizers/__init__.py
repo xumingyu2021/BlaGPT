@@ -29,7 +29,12 @@ def get_optimizer(
         module = importlib.import_module("optimizers.radam")
         optimizer = getattr(module, "RAdam")
     elif optimizer_name.lower() == "palm_soap":
-        from heavyball import PaLMForeachSOAP
+        try:
+            from heavyball import PaLMForeachSOAP
+        except ImportError:
+            raise ImportError(
+                "To use PaLMForeachSOAP, please install the heavyball package."
+            )
 
         module = PaLMForeachSOAP
     elif optimizer_name.lower() == "ademamix":
@@ -45,6 +50,22 @@ def get_optimizer(
     elif optimizer_name.lower() == "c_adamw":
         module = importlib.import_module("optimizers.c_adamw")
         optimizer = getattr(module, "AdamW")
+    elif optimizer_name.lower() == "demo":
+        module = importlib.import_module("optimizers.demo")
+        optimizer = getattr(module, "DeMo")
+    elif optimizer_name.lower() == "adam_mini":
+        try:
+            from adam_mini import Adam_mini
+        except ImportError:
+            raise ImportError("To use Adam_mini, please install the adam-mini package.")
+
+        optimizer = Adam_mini(
+            named_parameters=model.named_parameters(), lr=lr, **optimizer_params
+        )
+        optimizer.wqk_names.add("kv_proj")
+        optimizer.attn_proj_names.add("c_proj")
+
+        return optimizer
     else:
         optimizer = getattr(torch.optim, optimizer_name)
     return optimizer(parameters, lr=lr, **optimizer_params)
