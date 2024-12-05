@@ -166,7 +166,7 @@ if __name__ == "__main__":
                 "weight_decay": 0.0,
             }
         )
-        learning_rate: float = 0.001
+        learning_rate: float = 0.003 #0.001
         warmup_iters: int = 250
         warmdown_iters: int = 2000  # number of iterations of linear warmup/warmdown for triangular or trapezoidal schedule
 
@@ -184,9 +184,11 @@ if __name__ == "__main__":
         save_best_model: bool = True  # whether to save best model based on val loss
 
     args = Hyperparameters()
-    model_config, model = get_model(cli_args.model_name)
+    # model_config, model = get_model(cli_args.model_name)
+    from bla_gpt import GPTConfig,GPT
+    model_config,model = GPTConfig,GPT
     model_config = model_config()
-
+    model_config.attention =  'kvshifting'
     # Override Hyperparameters with matching model_config attributes
     for key, value in model_config.to_dict().items():
         if hasattr(args, key):
@@ -241,7 +243,8 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
     model = model(model_config)
     model = model.cuda()
-
+    print(model)
+    print(model_config)
     if args.compile_model:
         model = torch.compile(model)
 

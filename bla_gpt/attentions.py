@@ -6,7 +6,7 @@ from kernel.rotary import apply_rotary_emb as apply_rotary_emb_kernel
 from modules.pattention import Pattention
 from torch import nn
 from torch.nn import functional as F
-
+# from flash_attn import flash_attn_func
 try:
     from apex.normalization import FusedRMSNorm as RMSNorm
 except ModuleNotFoundError:
@@ -61,7 +61,8 @@ class Attention(nn.Module):
         if config.rmsnorm_before_qk:
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
-
+        if config.subln:
+            self.subln = RMSNorm(self.head_dim)
         # Rotary embeddings
         if config.pos_encoding == "rotary":
             self.rotary = Rotary(self.head_dim, base=config.rope_theta)
@@ -135,7 +136,8 @@ class Attention(nn.Module):
             y = self._flash_attention(q, k, v)
         else:
             y = self._manual_attention(q, k, v, T)
-
+        if hasattr(self, "subln"):
+            y = self.subln(y)
         # Project output
         return self._project_output(y, B, T_q, C)
 
@@ -573,12 +575,72 @@ class MultiheadDiffAttn(nn.Module):
         self.subln = RMSNorm(2 * self.head_dim)
         self.rotary = Rotary(self.head_dim)
 
+    # def forward(
+    #     self,
+    #     x,
+    #     attn_mask=None,
+    # ):
+    #     bsz, tgt_len, _ = x.size()
+    #     src_len = tgt_len
+
+    #     q = self.q_proj(x)
+    #     k = self.k_proj(x)
+    #     v = self.v_proj(x)
+
+    #     q = q.view(bsz, tgt_len, 2 * self.num_heads, self.head_dim)
+    #     k = k.view(bsz, src_len, 2 * self.num_kv_heads, self.head_dim)
+    #     v = v.view(bsz, src_len, self.num_kv_heads, 2 * self.head_dim)
+
+    #     cos, sin = self.rotary(q)
+
+    #     q = apply_rotary_emb(q, cos, sin)
+    #     k = apply_rotary_emb(k, cos, sin)
+
+    #     offset = src_len - tgt_len
+    #     q = q.transpose(1, 2)
+    #     k = repeat_kv(k.transpose(1, 2), self.n_rep)
+    #     v = repeat_kv(v.transpose(1, 2), self.n_rep)
+    #     q *= self.scaling
+    #     attn_weights = torch.matmul(q, k.transpose(-1, -2))
+    #     if attn_mask is None:
+    #         attn_mask = torch.triu(
+    #             torch.zeros([tgt_len, src_len])
+    #             .float()
+    #             .fill_(float("-inf"))
+    #             .type_as(attn_weights),
+    #             1 + offset,
+    #         )
+    #     attn_weights = torch.nan_to_num(attn_weights)
+    #     attn_weights += attn_mask
+    #     attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).type_as(
+    #         attn_weights
+    #     )
+
+    #     lambda_1 = torch.exp(
+    #         torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()
+    #     ).type_as(q)
+    #     lambda_2 = torch.exp(
+    #         torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()
+    #     ).type_as(q)
+    #     lambda_full = lambda_1 - lambda_2 + self.lambda_init
+    #     attn_weights = attn_weights.view(bsz, self.num_heads, 2, tgt_len, src_len)
+    #     attn_weights = attn_weights[:, :, 0] - lambda_full * attn_weights[:, :, 1]
+
+    #     attn = torch.matmul(attn_weights, v)
+    #     attn = self.subln(attn)
+    #     attn = attn * (1 - self.lambda_init)
+    #     attn = attn.transpose(1, 2).reshape(
+    #         bsz, tgt_len, self.num_heads * 2 * self.head_dim
+    #     )
+
+    #     attn = self.out_proj(attn)
+    #     return attn
     def forward(
         self,
         x,
         attn_mask=None,
     ):
-        bsz, tgt_len, _ = x.size()
+        bsz, tgt_len, embed_dim = x.size()
         src_len = tgt_len
 
         q = self.q_proj(x)
@@ -587,49 +649,35 @@ class MultiheadDiffAttn(nn.Module):
 
         q = q.view(bsz, tgt_len, 2 * self.num_heads, self.head_dim)
         k = k.view(bsz, src_len, 2 * self.num_kv_heads, self.head_dim)
-        v = v.view(bsz, src_len, self.num_kv_heads, 2 * self.head_dim)
+        v = v.view(bsz, src_len, self.num_kv_heads, 2, self.head_dim)
 
         cos, sin = self.rotary(q)
 
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
 
-        offset = src_len - tgt_len
-        q = q.transpose(1, 2)
-        k = repeat_kv(k.transpose(1, 2), self.n_rep)
-        v = repeat_kv(v.transpose(1, 2), self.n_rep)
-        q *= self.scaling
-        attn_weights = torch.matmul(q, k.transpose(-1, -2))
-        if attn_mask is None:
-            attn_mask = torch.triu(
-                torch.zeros([tgt_len, src_len])
-                .float()
-                .fill_(float("-inf"))
-                .type_as(attn_weights),
-                1 + offset,
-            )
-        attn_weights = torch.nan_to_num(attn_weights)
-        attn_weights += attn_mask
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).type_as(
-            attn_weights
-        )
+        q = q.reshape(bsz, tgt_len, self.num_heads, 2, self.head_dim)
+        k = k.reshape(bsz, src_len, self.num_kv_heads, 2, self.head_dim)
+        q1, q2 = q[:, :, :, 0], q[:, :, :, 1]
+        k1, k2 = k[:, :, :, 0], k[:, :, :, 1]
+        v1, v2 = v[:, :, :, 0], v[:, :, :, 1]
 
-        lambda_1 = torch.exp(
-            torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()
-        ).type_as(q)
-        lambda_2 = torch.exp(
-            torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()
-        ).type_as(q)
+        attn11 = flash_attn_func(q1, k1, v1, causal=True)
+        attn12 = flash_attn_func(q1, k1, v2, causal=True)
+        attn1 = torch.cat([attn11, attn12], dim=-1)
+        
+        attn21 = flash_attn_func(q2, k2, v1, causal=True)
+        attn22 = flash_attn_func(q2, k2, v2, causal=True)
+        attn2 = torch.cat([attn21, attn22], dim=-1)
+        
+        lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()).type_as(q)
+        lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()).type_as(q)
         lambda_full = lambda_1 - lambda_2 + self.lambda_init
-        attn_weights = attn_weights.view(bsz, self.num_heads, 2, tgt_len, src_len)
-        attn_weights = attn_weights[:, :, 0] - lambda_full * attn_weights[:, :, 1]
+        attn = attn1 - lambda_full * attn2
 
-        attn = torch.matmul(attn_weights, v)
         attn = self.subln(attn)
         attn = attn * (1 - self.lambda_init)
-        attn = attn.transpose(1, 2).reshape(
-            bsz, tgt_len, self.num_heads * 2 * self.head_dim
-        )
-
+        attn = attn.reshape(bsz, tgt_len, self.num_heads * 2 * self.head_dim)
+        
         attn = self.out_proj(attn)
         return attn

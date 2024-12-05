@@ -55,6 +55,7 @@ class GPTConfig(Coqpit):
     tie_embed_weights: bool = True
     zero_init_proj_layers: bool = True
     rmsnorm_before_qk: bool = True
+    subln: bool = False
     pos_encoding: bool = "rotary"
     use_res_weights: bool = False
     use_qkv_bias: bool = False  # from Qwen, for better length generalization. Not an issue with block_size=1024
@@ -62,8 +63,8 @@ class GPTConfig(Coqpit):
     rope_theta: float = 10000  # 1000000.0 in llama3 models
 
     # dilated attention parameters
-    segment_sizes: list[int] = field(default_factory=lambda: [64, 128, 256, 512, 1024])
-    dilation_rates: list[int] = field(default_factory=lambda: [1, 2, 4, 6, 12])
+    # segment_sizes: list[int] = field(default_factory=lambda: [64, 128, 256, 512, 1024])
+    # dilation_rates: list[int] = field(default_factory=lambda: [1, 2, 4, 6, 12])
 
     """About z-loss: instability occurs
     when the logits diverge and become very negative, as
