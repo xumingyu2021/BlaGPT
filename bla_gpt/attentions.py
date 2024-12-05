@@ -6,7 +6,7 @@ from kernel.rotary import apply_rotary_emb as apply_rotary_emb_kernel
 from modules.pattention import Pattention
 from torch import nn
 from torch.nn import functional as F
-# from flash_attn import flash_attn_func
+from flash_attn import flash_attn_func
 try:
     from apex.normalization import FusedRMSNorm as RMSNorm
 except ModuleNotFoundError:
