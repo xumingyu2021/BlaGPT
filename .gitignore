@@ -162,6 +162,6 @@ cython_debug/
 #.idea/
 
 # project ignores
-logs/*
-bla_gpt/logs/*
+# logs/*
+# bla_gpt/logs/*
 data/fineweb10B
